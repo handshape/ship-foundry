@@ -359,7 +359,7 @@ function drawEmblem(ctx, size, rng, accent, glow, style) {
 
 // Roughness: mid-gray base (modulated by material.roughness), darker (smoother)
 // over greebles, brighter (rougher) over wear. Grayscale -> linear (NoColorSpace).
-function buildRoughness(ctx, size, rng, greebles, wear) {
+function buildRoughness(size, rng, greebles, wear) {
   const canvas = makeCanvas(size)
   const rctx = canvas.getContext('2d')
   const base = 150
@@ -398,7 +398,7 @@ function buildRoughness(ctx, size, rng, greebles, wear) {
 
 // Metalness: mostly non-metal hull; accent stripes + emblem read as metal.
 // Grayscale -> linear (NoColorSpace).
-function buildMetalness(ctx, size, rng, p) {
+function buildMetalness(size, rng, p) {
   const canvas = makeCanvas(size)
   const mctx = canvas.getContext('2d')
   const base = 40
@@ -450,8 +450,8 @@ export function generateTextures(params = {}) {
   if (p.emblem.enabled) drawEmblem(ctx, size, rng, accent, glow, p.emblem.style)
 
   const map = toTexture(canvas, true)
-  const roughnessMap = toTexture(buildRoughness(ctx, size, rng, p.greebles, p.wear), false)
-  const metalnessMap = toTexture(buildMetalness(ctx, size, rng, p), false)
+  const roughnessMap = toTexture(buildRoughness(size, rng, p.greebles, p.wear), false)
+  const metalnessMap = toTexture(buildMetalness(size, rng, p), false)
 
   return { map, roughnessMap, metalnessMap }
 }
@@ -463,13 +463,9 @@ export function createShipMaterial(textures = {}, { emissive } = {}) {
     map: textures.map ?? null,
     roughnessMap: textures.roughnessMap ?? null,
     metalnessMap: textures.metalnessMap ?? null,
-    normalMap: textures.normalMap ?? null,
     // Base PBR scalars; the (linear) maps modulate these.
     metalness: 0.55,
     roughness: 0.7,
-    // DEBUG: partial transparency so clipping/interpenetration is visible.
-    transparent: true,
-    opacity: 0.4,
     ...(emissiveColor !== null ? { emissive: new THREE.Color(emissiveColor), emissiveIntensity: 0.6 } : {}),
   })
   // Albedo is sRGB; PBR maps stay linear (NoColorSpace) on the CanvasTextures.

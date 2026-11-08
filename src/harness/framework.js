@@ -163,20 +163,9 @@ export function runHarness(harness) {
   const regenerate = debounce(renderPreview, 80)
 
   const api = {
-    scene: vp.scene,
     // The current preview group (holds generated + placeholder).
     get shipRoot() {
       return preview.group
-    },
-    // Replace the preview ship with a freshly generated group (legacy hook; the
-    // viewport disposes the previous group and reframes to the new one).
-    setShip(group) {
-      vp.setShip(group)
-      preview.group = group
-    },
-    // Hook for explicit invalidation; the render loop is always running.
-    refresh() {
-      vp.resize()
     },
     // Current working ShipConfig (a clone) from the shared app/state store.
     getConfig() {

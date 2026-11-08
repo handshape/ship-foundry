@@ -29,6 +29,7 @@ const MODULES_SCHEMA = [
   { key: 'bridgeEnabled', label: 'Bridge', type: 'toggle' },
   { key: 'bridgeSize', label: 'Bridge size', type: 'slider', min: 0.5, max: 2, step: 0.01 },
   { key: 'bridgeStyle', label: 'Bridge style', type: 'select', options: BRIDGE_STYLES },
+  { key: 'bridgePosition', label: 'Bridge position (0 stern → 1 nose)', type: 'slider', min: 0, max: 1, step: 0.01 },
   // commandSpike
   { key: 'commandSpikeEnabled', label: 'Command spike', type: 'toggle' },
   { key: 'commandSpikeHeight', label: 'Spike height', type: 'slider', min: 1, max: 15, step: 0.5 },
@@ -73,6 +74,7 @@ function flattenModules(m) {
     bridgeEnabled: m.bridge?.enabled,
     bridgeSize: m.bridge?.size,
     bridgeStyle: m.bridge?.style,
+    bridgePosition: m.bridge?.position,
     commandSpikeEnabled: m.commandSpike?.enabled,
     commandSpikeHeight: m.commandSpike?.height,
     commandSpikeStyle: m.commandSpike?.style,
@@ -118,7 +120,7 @@ function unflattenModules(flat) {
       }
     }
   }
-  nest('bridge', [['bridgeEnabled', 'enabled'], ['bridgeSize', 'size'], ['bridgeStyle', 'style']])
+  nest('bridge', [['bridgeEnabled', 'enabled'], ['bridgeSize', 'size'], ['bridgeStyle', 'style'], ['bridgePosition', 'position']])
   nest('commandSpike', [['commandSpikeEnabled', 'enabled'], ['commandSpikeHeight', 'height'], ['commandSpikeStyle', 'style']])
   nest('nacelles', [['nacellesEnabled', 'enabled'], ['nacellesCount', 'count'], ['nacellesSize', 'size'], ['nacellesStrut', 'strut'], ['nacellesLift', 'lift'], ['nacellesAngle', 'angle'], ['nacellesTail', 'tail'], ['nacellesMount', 'mount'], ['nacellesType', 'type']])
   nest('weapons', [['weaponsEnabled', 'enabled'], ['weaponsCount', 'count'], ['weaponsSize', 'size'], ['weaponsStyle', 'style'], ['weaponsPosition', 'position']])

@@ -12,10 +12,9 @@
 // Keeping the whole config plain JSON is what lets us persist it to IndexedDB
 // and round-trip it through the tuning harnesses with no (de)serialization.
 //
-// The schema below is the single source of truth: `normalizeConfig`,
-// `validateConfig`, and `randomFromSchema` are all driven by it, so adding a
-// field here is all an aspect needs to make it default, clampable, validatable,
-// and randomizable.
+// The schema below is the single source of truth: `normalizeConfig` and
+// `randomFromSchema` are both driven by it, so adding a field here is all an
+// aspect needs to make it default, clampable, and randomizable.
 //
 // Leaf spec types:
 //   { type: 'number',  min, max, default, int? }
@@ -80,14 +79,18 @@ export const SHIP_CONFIG_SCHEMA = {
     type: 'object',
     children: {
       density: num(0, 1, 0.5),
-      bridge: {
-        type: 'object',
-        children: {
-          enabled: flag(true),
-          size: num(0.5, 2, 1),
-          style: choice(BRIDGE_STYLES, 'faceted'),
+        bridge: {
+          type: 'object',
+          children: {
+            enabled: flag(true),
+            size: num(0.5, 2, 1),
+            style: choice(BRIDGE_STYLES, 'faceted'),
+            // Where along the hull the bridge sits: 0 = stern, 0.5 = midship,
+            // 1 = fore/nose. The 'nose' bridge style always snaps to the fore
+            // tip regardless of this; other styles read it as the z placement.
+            position: num(0, 1, 0.65),
+          },
         },
-      },
       commandSpike: {
         type: 'object',
         children: {
@@ -218,12 +221,6 @@ function isObject(v) {
   return v !== null && typeof v === 'object' && !Array.isArray(v)
 }
 
-function describe(v) {
-  if (v === null) return 'null'
-  if (Array.isArray(v)) return 'array'
-  return typeof v
-}
-
 function clampNum(value, spec) {
   let n = Number(value)
   if (!Number.isFinite(n)) n = spec.default
@@ -271,64 +268,6 @@ export function normalizeConfig(config = {}) {
     out[key] = normalizeLeaf(src[key], spec)
   }
   return out
-}
-
-// --- validation --------------------------------------------------------------
-
-function validateLeaf(value, spec, path, errors) {
-  if (value === undefined) return // missing -> default fills in
-  switch (spec.type) {
-    case 'number': {
-      if (typeof value !== 'number' || !Number.isFinite(value)) {
-        errors.push(`${path}: expected a finite number, got ${describe(value)}`)
-        return
-      }
-      if (value < spec.min || value > spec.max) {
-        errors.push(`${path}: ${value} is out of range [${spec.min}, ${spec.max}]`)
-      }
-      break
-    }
-    case 'boolean':
-      if (typeof value !== 'boolean') {
-        errors.push(`${path}: expected a boolean, got ${describe(value)}`)
-      }
-      break
-    case 'choice':
-      if (!spec.enum.includes(value)) {
-        errors.push(`${path}: '${value}' is not one of [${spec.enum.join(', ')}]`)
-      }
-      break
-    case 'string':
-      if (typeof value !== 'string' || !value.length) {
-        errors.push(`${path}: expected a non-empty string, got ${describe(value)}`)
-      }
-      break
-    case 'palette':
-      if (!isGoodPalette(value)) {
-        errors.push(`${path}: expected an array of 4 color strings, got ${describe(value)}`)
-      }
-      break
-    case 'object': {
-      if (!isObject(value)) {
-        errors.push(`${path}: expected an object, got ${describe(value)}`)
-        return
-      }
-      for (const [key, childSpec] of Object.entries(spec.children)) {
-        validateLeaf(value[key], childSpec, `${path}.${key}`, errors)
-      }
-      break
-    }
-    // Unknown leaf spec types are ignored (forward-compatible).
-  }
-}
-
-export function validateConfig(config = {}) {
-  const src = isObject(config) ? config : {}
-  const errors = []
-  for (const [key, spec] of Object.entries(SHIP_CONFIG_SCHEMA)) {
-    validateLeaf(src[key], spec, key, errors)
-  }
-  return { ok: errors.length === 0, errors }
 }
 
 // --- randomization -----------------------------------------------------------
@@ -524,18 +463,9 @@ export function randomAestheticId(rng) {
   return ids.length ? rng.pick(ids) : 'placeholder'
 }
 
-// A fresh biased palette (desaturated base + derived tones) for the UI
-// "Randomize" button. Returns a 4-slot [base, secondary, accent, glow] array.
-export function randomizePalette(rng) {
-  return randomPalette(rng)
-}
-
 // --- public config utilities -------------------------------------------------
 
 // A deep clone of the given config (plain JSON round-trip helper).
 export function cloneConfig(config = {}) {
   return JSON.parse(JSON.stringify(config ?? {}))
 }
-
-// The full default config, derived from the schema so it can never drift.
-export const DEFAULT_SHIP_CONFIG = normalizeConfig({})

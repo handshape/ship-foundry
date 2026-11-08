@@ -63,8 +63,8 @@ function deepMerge(target, patch) {
   return target
 }
 
-// Persist the working config as a named preset via storage, and publish a
-// snapshot so a later main-app load can apply it. Returns the saved preset id.
+// Persist the working config as a named preset via storage. Returns the saved
+// preset id.
 async function savePreset(name) {
   const cfg = cloneConfig(ensure())
   const presetName = name || `Preset ${new Date().toLocaleString()}`
@@ -73,15 +73,10 @@ async function savePreset(name) {
     config: cfg,
     aesthetic: cfg.aesthetic,
   })
-  appState.publish(id, cfg)
   return id
 }
 
 export const appState = {
-  // Snapshot of the last published preset ({ id, config, aesthetic, at }).
-  // The main app (SP-08) can apply it after a harness save.
-  lastSaved: null,
-
   // Current working ShipConfig (a clone, so callers can't mutate the store).
   get() {
     return cloneConfig(ensure())
@@ -107,19 +102,6 @@ export const appState = {
     config = normalizeConfig(next)
     notify()
     return cloneConfig(config)
-  },
-
-  // Publish the tuned config back so the main app can apply it. `snapshot` is
-  // a plain { id, config, aesthetic, at } the main app (SP-08) can consume.
-  publish(id, cfg) {
-    appState.lastSaved = {
-      id,
-      config: cloneConfig(cfg),
-      aesthetic: cfg?.aesthetic ?? null,
-      at: Date.now(),
-    }
-    notify()
-    return appState.lastSaved
   },
 
   savePreset,

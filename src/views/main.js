@@ -7,7 +7,7 @@ import { onCleanup } from '../app/cleanup.js'
 import { appState } from '../app/state.js'
 import { listAesthetics, applyAesthetic } from '../core/aesthetics/index.js'
 import { createRng } from '../core/generator/rng.js'
-import { normalizeConfig, randomAestheticId, randomizePalette } from '../core/generator/config.js'
+import { normalizeConfig, randomAestheticId, randomPalette } from '../core/generator/config.js'
 import { paramControls } from '../harness/controls.js'
 import { HULL_ARCHETYPES, HULL_SECTIONS } from '../core/generator/hull.js'
 import {
@@ -106,6 +106,7 @@ const MODULE_FIELD_LABELS = {
   layout: 'Layout',
   strut: 'Strut',
   position: 'Position',
+  'bridge.position': 'Along hull',
   lift: 'Lift',
   angle: 'Angle',
   tail: 'Tail',
@@ -383,14 +384,15 @@ export function mainView() {
       for (const [fk, fv] of Object.entries(value)) {
         if (fk === 'enabled') continue
         if (typeof fv === 'string') {
-          fieldSpecs.push({ key: fk, label: MODULE_FIELD_LABELS[fk] ?? fk, type: 'select', options: MODULE_FIELD_OPTIONS[`${name}.${fk}`] ?? [] })
+          fieldSpecs.push({ key: fk, label: MODULE_FIELD_LABELS[`${name}.${fk}`] ?? MODULE_FIELD_LABELS[fk] ?? fk, type: 'select', options: MODULE_FIELD_OPTIONS[`${name}.${fk}`] ?? [] })
         } else {
+          const isBridgePos = name === 'bridge' && fk === 'position'
           fieldSpecs.push({
             key: fk,
-            label: MODULE_FIELD_LABELS[fk] ?? fk,
+            label: MODULE_FIELD_LABELS[`${name}.${fk}`] ?? MODULE_FIELD_LABELS[fk] ?? fk,
             type: typeof fv === 'number' ? (fk === 'count' ? 'number' : 'slider') : 'toggle',
-            min: 0,
-            max: fk === 'count' ? 8 : 1,
+            min: isBridgePos ? 0 : 0,
+            max: fk === 'count' ? 8 : isBridgePos ? 1 : 1,
             int: fk === 'count',
             step: 0.01,
           })
@@ -427,8 +429,8 @@ export function mainView() {
   }
 
   // Keep the working config in sync with the viewport/card/controls whenever it
-  // changes — including when a harness publishes a tuned config (lastSaved) or
-  // the user edits a control.
+  // changes — including when a harness publishes a tuned config or the user
+  // edits a control.
   function applyExternalConfig(cfg) {
     const { group } = generateShip(cfg, cfg.seed)
     const old = currentGroup
@@ -473,7 +475,7 @@ export function mainView() {
     const rng = createRng(seed)
     const raw = randomConfig(seed)
     raw.aesthetic = randomAestheticId(rng)
-    raw.texture.palette = randomizePalette(rng)
+    raw.texture.palette = randomPalette(rng)
     const cfg = normalizeConfig(applyAesthetic(raw.aesthetic, raw, rng))
     appState.setConfig(cfg)
     note(`New ship (seed ${seed}).`)
@@ -621,11 +623,10 @@ export function mainView() {
   updateShipCard(bootCfg)
   renderGallery()
 
-  // Keep in sync with external changes: a harness publishes a tuned config
-  // (appState.lastSaved) or the user patches from another surface. Regenerate +
-  // re-frame and rebuild the panels to match. The subscription is registered
-  // AFTER boot so the boot setConfig above does not trigger it (no double
-  // generate on load).
+  // Keep in sync with external changes: a harness publishes a tuned config or
+  // the user patches from another surface. Regenerate + re-frame and rebuild the
+  // panels to match. The subscription is registered AFTER boot so the boot
+  // setConfig above does not trigger it (no double generate on load).
   appState.subscribe((cfg) => applyExternalConfig(cfg))
 
   vp.startLoop()

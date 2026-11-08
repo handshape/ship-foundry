@@ -133,9 +133,9 @@ export const WEAPON_STYLES = [
 export const WEAPON_POSITIONS = ['top', 'chin', 'belly', 'nose']
 
 // Per-weapon-style glow accents. Turret/gunhouse styles are mat-only (no glow);
-// the cannon variants and railgun get an emissive tip/channel. All emissive
-// tips/channels share the ship's single emissive colour (the `glowColor`
-// threaded in by generateModules) so a ship's lights read as one signature.
+// the cannon variants and railgun get an emissive tip/channel. Every glowing part
+// shares the ship's single glow material (ctx.glowMat, built from palette[3] in
+// generateModules) so a ship's lights read as one coherent signature.
 const WEAPON_GLOW_STYLES = new Set([
   'cannon',
   'longCannon',
@@ -145,18 +145,11 @@ const WEAPON_GLOW_STYLES = new Set([
   'tipGlow',
   'railgun',
 ])
-function weaponGlowMat(style, glowColor) {
+// Return the shared glow material for weapon styles that glow, else null (the
+// turret/gunhouse family has no emissive accent).
+function weaponGlowMat(style, sharedGlowMat) {
   const s = WEAPON_STYLES.includes(style) ? style : 'turret'
-  if (!WEAPON_GLOW_STYLES.has(s)) return null // 'turret' etc. have no glow accent
-  return makeGlowMaterial(glowColor)
-}
-
-// Per-component glow: every glowing module (command spike, hangar light, sensor
-// mast, antenna, bridge windows) shares the ship's single emissive colour. The
-// `glowColor` is threaded in by generateModules; `component` is retained for
-// call-site clarity but no longer selects a distinct hue.
-function moduleGlowMat(component, glowColor) {
-  return makeGlowMaterial(glowColor)
+  return WEAPON_GLOW_STYLES.has(s) ? sharedGlowMat : null
 }
 
 // Derive a glass tint from the ship's single emissive colour: a brightened
@@ -660,26 +653,32 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
 
 // --- module builders ---------------------------------------------------------
 
-// Bridge: superstructure, on the deck (top anchor) toward the fore (+Z).
-// `t` is the normalized z of this instance (0.62 = main bridge at density 1; a
-// second instance sits further aft). A family of four distinct silhouettes, each
-// multi-part and multi-material (hull `mat` + glass viewscreens + a glowing
-// accent):
+// Bridge: superstructure, on the deck (top anchor). `t` is the normalized z of
+// this instance (0 = stern, 0.5 = midship, 1 = fore/nose) and is driven by the
+// config's `position` field so the bridge can sit ANYWHERE along the hull,
+// including right at the nose. A family of distinct silhouettes, each multi-part
+// and multi-material (hull `mat` + glass viewscreens + a glowing accent):
 //   faceted (default): an angular, bevelled cockpit — chamfered hull body with a
 //                      multi-faceted glass windshield (the "block" box, retired).
-//   sweep:             a rounded, streamlined canopy that tapers toward the bow.
 //   dome:              a rounded glass dome on a low deck collar.
-//   spire:             a tapered command tower + glowing window ring + tip beacon.
+//   capsule:           a TIE-bridge prism (glass or matte) on a round/wedge neck.
+//   pillbox:           a low, wide hexagonal frustum with a forward luminous slit.
+//   nose:              a forward cockpit hunched on the very tip (always fore.z).
+// The bridge is a single CENTRELINE module (built once, on x=0), so it is flagged
+// userData.isCentreline and excluded from the port/stbd mirror below.
 function buildBridge(rng, ctx) {
   const { mat, glowMat, hull, fore, surface, glowColor } = ctx
   const cfg = ctx.params.bridge
   const style = BRIDGE_STYLES.includes(cfg.style) ? cfg.style : 'faceted'
-  const t = ctx.t
   const s = cfg.size ?? 1
   const w = hull.beam * 0.3 * s
   const h = hull.height * 0.35 * s
   const d = hull.length * 0.16 * s
-  const z = lerp(0, fore.z, t)
+  // Position along the hull, from `position` (0 = stern, 0.5 = midship,
+  // 1 = fore/nose). The lerp spans the full stern→nose length so the bridge can
+  // sit anywhere. The 'nose' style ignores it and always snaps to the very tip.
+  const tPos = style === 'nose' ? 1 : clamp(cfg.position ?? 0.65, 0, 1)
+  const z = lerp(-fore.z, fore.z, tPos)
   // FIT GUARD: seat the bridge base on the real deck height at this z, not the
   // envelope top anchor (which can be higher on saucer/wedge/insect). The
   // embedding is a fraction of the module's own height so the base penetrates
@@ -689,19 +688,27 @@ function buildBridge(rng, ctx) {
   const glass = glassMaterial(glowColor)
   const base = { mat, glowMat, glass, hull, s, w, h, d, z, topY: baseY, fore }
 
+  let g
   switch (style) {
     case 'dome':
-      return buildBridgeDome(base)
+      g = buildBridgeDome(base)
+      break
     case 'nose':
-      return buildBridgeNose(base)
+      g = buildBridgeNose(base)
+      break
     case 'capsule':
-      return buildBridgeCapsule(rng, base)
+      g = buildBridgeCapsule(rng, base)
+      break
     case 'pillbox':
-      return buildBridgePillbox(base)
+      g = buildBridgePillbox(base)
+      break
     case 'faceted':
     default:
-      return buildBridgeFaceted(base)
+      g = buildBridgeFaceted(base)
+      break
   }
+  g.userData.isCentreline = true
+  return g
 }
 
 // Nose: a forward cockpit hunched on the very tip of the hull — the bridge sits
@@ -726,9 +733,10 @@ function buildBridgeNose(b) {
   group.add(collar)
 
   // A faceted glass canopy (glass), pointed toward the bow (stretched +Z) so it
-  // reads as a nose cone rather than a dome.
+  // reads as a nose cone rather than a dome. Truncated icosahedron for the
+  // multi-facet "frustrated points" look.
   const canopyR = w * 0.5
-  const canopy = new THREE.Mesh(new THREE.IcosahedronGeometry(canopyR, 0), glass)
+  const canopy = new THREE.Mesh(makeTruncatedIcosahedron(canopyR), glass)
   canopy.name = 'bridgeNoseGlass'
   canopy.scale.set(w / canopyR, (h * 0.55) / canopyR, (d * 0.7) / canopyR)
   canopy.position.set(0, tipY + h * 0.4, tipZ)
@@ -813,10 +821,11 @@ function buildBridgeDome(b) {
 }
 
 // Capsule: a geometric capsule on a neck — a Star Wars TIE-bridge aesthetic.
-// The capsule is a squashed prism of a regular polygon (even sides: 6 or 8)
-// extruded along the travel axis (+Z), with a flat face on top and a flat
-// face fore (aligned with the slit). Some capsules are enclosed glass
-// cockpits (glass material), others are matte prisms (mat). Two neck styles:
+// The capsule is a widely-stretched even-sided polygonal prism (4, 6, or 8
+// sides) extruded along the travel axis (+Z). Orientation: 4 and 8 have flat
+// top/bottom faces; 6 has a point at top. Optional edge bevel. Some capsules
+// are enclosed glass cockpits (glass material), others are matte prisms (mat).
+// Two neck styles:
 //   round:  a short tapered cylinder with a flange (classic).
 //   wedge:  a triangular prism extruded in X, with its bottom face flush
 //           (or slightly embedded) in the hull and its apex reaching into
@@ -828,11 +837,14 @@ function buildBridgeCapsule(rng, b) {
 
   const isGlass = rng.chance(0.4)
   const capsuleMat = isGlass ? glass : mat
-  const sides = rng.int(3, 4) * 2
+  const sides = rng.int(2, 4) * 2
   const rotY = Math.PI / sides
   const capsuleR = w * 0.42
   const capsuleLen = d * 0.7
-  const xStretch = 1.35
+  const xStretch = 2.2
+  const hasBevel = rng.chance(0.5)
+  const bevelT = hasBevel ? capsuleR * 0.12 : 0
+  const bevelS = hasBevel ? capsuleR * 0.1 : 0
 
   const neckStyle = rng.chance(0.5) ? 'wedge' : 'round'
   let capY, capZ = z
@@ -886,15 +898,36 @@ function buildBridgeCapsule(rng, b) {
     capY = topY + neckH + capsuleR * 0.9
   }
 
-  // Capsule: a regular polygon (6 or 8 sides) extruded along +Z, stretched
-  // in X so it reads as wide enough to hold a deck inside.
-  const capsule = new THREE.Mesh(new THREE.CylinderGeometry(capsuleR, capsuleR, capsuleLen, sides), capsuleMat)
+  // Capsule body: a regular polygon extruded along +Z (the travel axis),
+  // stretched in X. rotY = PI/sides orients the polygon: flat top for 4/8,
+  // point at top for 6. Optional bevel on the fore/aft edges.
+  const polyShape = new THREE.Shape()
+  for (let k = 0; k < sides; k++) {
+    const angle = (k / sides) * Math.PI * 2
+    const px = Math.cos(angle) * capsuleR
+    const py = Math.sin(angle) * capsuleR
+    if (k === 0) polyShape.moveTo(px, py)
+    else polyShape.lineTo(px, py)
+  }
+  polyShape.closePath()
+
+  const capsuleGeo = new THREE.ExtrudeGeometry(polyShape, {
+    depth: capsuleLen,
+    bevelEnabled: hasBevel,
+    bevelThickness: bevelT,
+    bevelSize: bevelS,
+    bevelSegments: 1,
+  })
+  capsuleGeo.translate(0, 0, -capsuleLen / 2)
+
+  const capsule = new THREE.Mesh(capsuleGeo, capsuleMat)
   capsule.name = isGlass ? 'bridgeCapsuleGlass' : 'bridgeCapsulePrism'
   capsule.scale.set(xStretch, 1, 1)
   capsule.rotation.y = rotY
-  capsule.rotation.x = Math.PI / 2
   capsule.position.set(0, capY, capZ)
   group.add(capsule)
+
+  const foreZ = capsuleLen * 0.5 + bevelT
 
   // For the glass variant: a faceted cone tip pointing fore (+Z).
   if (isGlass) {
@@ -905,7 +938,7 @@ function buildBridgeCapsule(rng, b) {
     cap.scale.set(xStretch, 1, 1)
     cap.rotation.y = rotY
     cap.rotation.x = Math.PI / 2
-    cap.position.set(0, capY, capZ + capsuleLen * 0.5 + capLen * 0.5)
+    cap.position.set(0, capY, capZ + foreZ + capLen * 0.5)
     group.add(cap)
   } else {
     for (const [name, dz] of [['bridgeCapsulePrismCapFore', 1], ['bridgeCapsulePrismCapAft', -1]]) {
@@ -914,7 +947,7 @@ function buildBridgeCapsule(rng, b) {
       endCap.scale.set(xStretch, 1, 1)
       endCap.rotation.y = rotY
       endCap.rotation.x = Math.PI / 2
-      endCap.position.set(0, capY, capZ + dz * (capsuleLen * 0.5 + h * 0.02))
+      endCap.position.set(0, capY, capZ + dz * (capsuleLen * 0.5 + bevelT + h * 0.02))
       group.add(endCap)
     }
   }
@@ -924,7 +957,7 @@ function buildBridgeCapsule(rng, b) {
   const slitH = h * 0.04
   const slit = new THREE.Mesh(new THREE.BoxGeometry(slitW, slitH, h * 0.015), glowMat)
   slit.name = 'bridgeCapsuleSlit'
-  const foreFaceZ = capZ + capsuleLen * 0.5 + (isGlass ? capsuleLen * 0.3 * 0.85 : h * 0.05)
+  const foreFaceZ = capZ + foreZ + (isGlass ? capsuleLen * 0.3 * 0.85 : h * 0.05)
   slit.position.set(0, capY, foreFaceZ)
   group.add(slit)
 
@@ -981,10 +1014,10 @@ function buildBridgePillbox(b) {
 //   dish:            a mast topped by a glowing parabolic sensor bowl + feed arm.
 //   array:           a mast with a stack of glowing sensor plates + mat cross-bars.
 function buildCommandSpike(rng, ctx) {
-  const { mat, hull, fore, surface, glowColor } = ctx
+  const { mat, hull, fore, surface } = ctx
   const cfg = ctx.params.commandSpike
   const style = COMMAND_SPIKE_STYLES.includes(cfg.style) ? cfg.style : 'spike'
-  const glowMat = moduleGlowMat('commandSpike', glowColor)
+  const glowMat = ctx.glowMat
   const t = ctx.t
   const s = cfg.height / 6
   const h = hull.height * 1.1 * s
@@ -994,15 +1027,21 @@ function buildCommandSpike(rng, ctx) {
   const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
   const base = { mat, glowMat, hull, s, h, z, topY: baseY }
 
+  let g
   switch (style) {
     case 'dish':
-      return buildCommandSpikeDish(base)
+      g = buildCommandSpikeDish(base)
+      break
     case 'array':
-      return buildCommandSpikeArray(base)
+      g = buildCommandSpikeArray(base)
+      break
     case 'spike':
     default:
-      return buildCommandSpikeSpike(base)
+      g = buildCommandSpikeSpike(base)
+      break
   }
+  g.userData.isCentreline = true
+  return g
 }
 
 // Spike (default): the existing tapered mast + glowing sensor dome.
@@ -1401,7 +1440,7 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
     // Faceted hexagonal prism (crystal glass) with pointed caps at both ends.
     const crystalGlass = crystalGlassMaterial(glowColor)
     const prismR = r * 0.85
-    const prismLen = len * 0.7
+    const prismLen = len * 0.8
     const prism = new THREE.Mesh(new THREE.CylinderGeometry(prismR, prismR, prismLen, 6), crystalGlass)
     prism.name = 'nacelleCrystalPrism'
     prism.rotation.x = Math.PI / 2 // axis -> +Z
@@ -1409,7 +1448,7 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
     group.add(prism)
     // Pointed caps (same radius/segments as the prism, base flush with the
     // prism end — reads as a facet carved off the crystal).
-    const capLen = len * 0.25
+    const capLen = len * 0.1
     const prismEnd = prismLen / 2
     const noseCap = new THREE.Mesh(new THREE.ConeGeometry(prismR, capLen, 6), crystalGlass)
     noseCap.name = 'nacelleCrystalNose'
@@ -1522,11 +1561,11 @@ function buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat,
 // the +Z-alignment correctness + per-style distinctness matter more than the
 // draw-call win (see MODULE_SPECS).
 function buildWeapon(rng, ctx) {
-  const { mat, hull, fore, surface, glowColor } = ctx
+  const { mat, hull, fore, surface } = ctx
   const cfg = ctx.params.weapons
   const style = WEAPON_STYLES.includes(cfg.style) ? cfg.style : 'turret'
   const position = WEAPON_POSITIONS.includes(cfg.position) ? cfg.position : 'top'
-  const glowMat = weaponGlowMat(style, glowColor)
+  const glowMat = weaponGlowMat(style, ctx.glowMat)
   const n = cfg.count || 3
   const s = cfg.size ?? 1
   const i = ctx.i
@@ -1541,12 +1580,11 @@ function buildWeapon(rng, ctx) {
   let mountY
   let barrelY
   if (position === 'nose') {
-    // Nose: mounted right at the hull tip. A single centreline instance (its own
-    // mirror) for count 1; port/stbd pairs flanking the nose for count > 1.
-    const side = n > 1 ? (i % 2 === 0 ? -1 : 1) : 0
-    const sideExt = surface.surfaceAt('side', z)
+    // Nose: a row of weapons across the very tip (fixed z). Centred on the
+    // centreline and spread in X so each instance is distinct; flagged
+    // isCentreline below so the mirror does not double them.
     const topExt = surface.surfaceAt('top', z)
-    mountX = side * Math.min(R * 0.7, sideExt * 0.45)
+    mountX = (ctx.i - (ctx.n - 1) / 2) * R * 0.7
     mountY = topExt * 0.55
     barrelY = mountY + R * 0.3
   } else if (position === 'chin') {
@@ -1580,35 +1618,53 @@ function buildWeapon(rng, ctx) {
   }
 
   const base = { mat, glowMat, R, len, mountX, mountY, z, barrelX: mountX, barrelY }
+  let g
   switch (style) {
     // Turret / gunhouse family (distinct housings, mat + a +Z barrel).
     case 'twinTurret':
-      return buildWeaponTwinTurret(base)
+      g = buildWeaponTwinTurret(base)
+      break
     case 'boxy':
-      return buildWeaponBoxy(base)
+      g = buildWeaponBoxy(base)
+      break
     case 'dome':
-      return buildWeaponDome(base)
+      g = buildWeaponDome(base)
+      break
     case 'angular':
-      return buildWeaponAngular(base)
+      g = buildWeaponAngular(base)
+      break
     // Cannon family (thinner barrels, some with emissive tips).
     case 'longCannon':
-      return buildWeaponLongCannon(base)
+      g = buildWeaponLongCannon(base)
+      break
     case 'muzzleBrake':
-      return buildWeaponMuzzleBrake(base)
+      g = buildWeaponMuzzleBrake(base)
+      break
     case 'suppressor':
-      return buildWeaponSuppressor(base)
+      g = buildWeaponSuppressor(base)
+      break
     case 'dish':
-      return buildWeaponDish(base)
+      g = buildWeaponDish(base)
+      break
     case 'tipGlow':
-      return buildWeaponTipGlow(base)
+      g = buildWeaponTipGlow(base)
+      break
     case 'cannon':
-      return buildWeaponCannon(base)
+      g = buildWeaponCannon(base)
+      break
     case 'railgun':
-      return buildWeaponRailgun(base)
+      g = buildWeaponRailgun(base)
+      break
     case 'turret':
     default:
-      return buildWeaponTurret(base)
+      g = buildWeaponTurret(base)
+      break
   }
+  // `nose` (centred X row at a fixed z), `belly` (keel line, x=0), and `chin`
+  // at count=1 (x=0) are centreline placements; exclude them from the
+  // port/stbd mirror so they aren't doubled onto themselves.
+  if (position === 'nose' || position === 'belly' || (position === 'chin' && mountX === 0)) g.userData.isCentreline = true
+  return g
 }
 
 // --- weapon barrel helper ----------------------------------------------------
@@ -1938,29 +1994,35 @@ function buildWeaponRailgun(b) {
 // InstancedMesh the way the old single-mast + head did, and distinctness matters
 // more than the draw-call win here (see MODULE_SPECS).
 function buildSensorMast(rng, ctx) {
-  const { mat, hull, fore, surface, glowColor } = ctx
+  const { mat, hull, fore, surface } = ctx
   const cfg = ctx.params.sensorMast
   const style = SENSOR_MAST_STYLES.includes(cfg.style) ? cfg.style : 'mast'
-  const glowMat = moduleGlowMat('sensorMast', glowColor)
-  const n = cfg.count || 1
-  const i = ctx.i
+  const glowMat = ctx.glowMat
   const h = hull.height * 0.9 * (cfg.height / 4)
-  const z = lerp(hull.length * 0.05, fore.z * 0.9, symmetricT(i, n))
+  // Centreline deck features: placed on x=0 and staggered fore/aft via ctx.t
+  // (not mirrored — see PAIRED). No per-instance jitter, so the set is symmetric.
+  const z = lerp(hull.length * 0.05, fore.z * 0.9, ctx.t)
   const x = 0
   // FIT GUARD: seat the mast base on the real deck height at this z, embedding
   // by a fraction of its own height (guaranteed contact).
   const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
   const base = { mat, glowMat, hull, h, x, z, topY: baseY }
 
+  let g
   switch (style) {
     case 'pole':
-      return buildSensorMastPole(base)
+      g = buildSensorMastPole(base)
+      break
     case 'ring':
-      return buildSensorMastRing(base)
+      g = buildSensorMastRing(base)
+      break
     case 'mast':
     default:
-      return buildSensorMastMast(base)
+      g = buildSensorMastMast(base)
+      break
   }
+  g.userData.isCentreline = true
+  return g
 }
 
 // Mast (default): the existing slender mast + glowing sensor head.
@@ -2042,29 +2104,35 @@ function buildSensorMastRing(b) {
 // InstancedMesh the way the old single whip + tip did, and distinctness matters
 // more than the draw-call win here (see MODULE_SPECS).
 function buildAntenna(rng, ctx) {
-  const { mat, hull, fore, surface, glowColor } = ctx
+  const { mat, hull, fore, surface } = ctx
   const cfg = ctx.params.antenna
   const style = ANTENNA_STYLES.includes(cfg.style) ? cfg.style : 'whip'
-  const glowMat = moduleGlowMat('antenna', glowColor)
-  const n = cfg.count || 2
-  const i = ctx.i
+  const glowMat = ctx.glowMat
   const h = hull.height * 0.7
-  const z = lerp(hull.length * 0.1, fore.z * 0.95, symmetricT(i, n))
+  // Centreline deck features: placed on x=0 and staggered fore/aft via ctx.t
+  // (not mirrored — see PAIRED).
+  const z = lerp(hull.length * 0.1, fore.z * 0.95, ctx.t)
   const x = 0
   // FIT GUARD: seat the whip base on the real deck height at this z, embedding
   // by a fraction of its own height (guaranteed contact).
   const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
   const base = { mat, glowMat, hull, h, x, z, topY: baseY }
 
+  let g
   switch (style) {
     case 'array':
-      return buildAntennaArray(base)
+      g = buildAntennaArray(base)
+      break
     case 'dish':
-      return buildAntennaDish(base)
+      g = buildAntennaDish(base)
+      break
     case 'whip':
     default:
-      return buildAntennaWhip(base)
+      g = buildAntennaWhip(base)
+      break
   }
+  g.userData.isCentreline = true
+  return g
 }
 
 // Whip (default): the existing thin whip + tip; the tip now glows.
@@ -2149,11 +2217,11 @@ function buildAntennaDish(b) {
 //   pod:           a rounded hangar pod with a glowing docking-ring door.
 //   dock:          an open docking gantry with glowing guide-lights at the mouth.
 function buildHangar(rng, ctx) {
-  const { mat, hull, surface, glowColor, fore, t } = ctx
+  const { mat, hull, surface, fore, t } = ctx
   const cfg = ctx.params.hangar
   const style = HANGAR_STYLES.includes(cfg.style) ? cfg.style : 'bay'
   const position = HANGAR_POSITIONS.includes(cfg.position) ? cfg.position : 'side'
-  const glowMat = moduleGlowMat('hangar', glowColor)
+  const glowMat = ctx.glowMat
   const n = cfg.count || 1
   const i = ctx.i
   const side = n > 1 ? (i % 2 === 0 ? -1 : 1) : 1
@@ -2496,25 +2564,12 @@ function moduleCount(key, p, density, maxCount) {
   return Math.round(frac * maxCount)
 }
 
-// Symmetric normalized position (0..1) for instance `i` of `n`: a single
-// instance sits at the midpoint; an even count is placed in mirrored pairs about
-// the centre; an odd count has a centre instance plus mirrored pairs. This is
-// the "strong symmetry" placement helper — no jitter, so mirrored instances land
-// on exactly symmetric positions.
-function symmetricT(i, n) {
-  if (n <= 1) return 0.5
-  const half = (n + 1) / 2 // number of positions on one side incl. centre
-  const pos = i < n / 2 ? i + 1 : n - i // 1..half, mirrored
-  return pos / half
-}
-
 // Deterministic normalized z (0..1, fore-ward) for the `count` instances of a
 // module, spread evenly across the hull length. No per-instance jitter: the
 // strong-symmetry bias places instances on a symmetric grid (paired counts +
 // mirrored placement, see generateModules) so jitter would break the mirror.
 function instanceTs(count, key, _rng) {
   const spread = {
-    bridge: [0.6, 0.92],
     commandSpike: [0.6, 0.85],
     // Nacelles are biased toward MIDSHIP, away from the nose and stern tapers.
     // The spread [0.2, 0.7] keeps pods in the central 50% of the hull so their
@@ -2606,14 +2661,13 @@ export function generateModules(
   const density = clamp(params.density ?? 0.5, 0, 1)
   const ctxBase = { mat, glowMat, hull, top, bottom, port, starboard, fore, aft, params, surface, glowColor }
 
-  // Strong-symmetry bias: modules are placed as a single "half" group (the
-  // starboard/centreline side) that is then mirrored across the hull
-  // centreline (X). Paired modules get an even count so every instance has an
-  // exact mirror twin; a small set of modules (bridge / command spike /
-  // hangar) may additionally carry a single instance on the centreline. The
-  // per-builder placement is jitter-free (see instanceTs / symmetricT / the
-  // engine layouts) so the mirror is exact.
-  const PAIRED = new Set(['nacelles', 'weapons', 'sensorMast', 'antenna'])
+  // Strong-symmetry bias: paired modules are built as a single "half" group and
+  // then mirrored across the hull centreline (X) to their port twin. Modules
+  // that sit on the centreline (bridge / command spike / sensor mast / antenna /
+  // hangar) are flagged userData.isCentreline by their builder and are excluded
+  // from the mirror. The per-builder placement is jitter-free (see instanceTs)
+  // so the mirror is exact.
+  const PAIRED = new Set(['nacelles', 'weapons'])
   const moduleGroup = new THREE.Group()
   moduleGroup.name = 'modules:half'
 

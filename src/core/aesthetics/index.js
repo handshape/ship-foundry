@@ -87,7 +87,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Hard-surface military. Blocky slab hulls, grey-white palette, strong panel lines, functional modules, few accents.',
     params: {
       hull: {
-        archetype: C(['blocky', 'lance']),
+        archetype: C(['blocky', 'lance', 'wedge']),
         length: N(34, 70),
         beam: N(16, 34),
         height: N(8, 18),
@@ -101,7 +101,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.45, 0.7),
-        bridge: M({ enabled: true, size: N(0.8, 1.4) }),
+        bridge: M({ enabled: true, size: N(0.8, 1.4), position: N(0.55, 0.85) }),
         commandSpike: M({ enabled: B(0.4), height: N(4, 8) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 1.0), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: true, count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
@@ -133,7 +133,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Clean colonial / corporate. Long sleek hulls, white and light-grey, subtle wear, minimal modules, low accents.',
     params: {
       hull: {
-        archetype: C(['sleek', 'lance']),
+        archetype: C(['sleek', 'lance', 'twin']),
         length: N(45, 90),
         beam: N(10, 22),
         height: N(6, 14),
@@ -147,7 +147,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.2, 0.4),
-        bridge: M({ enabled: true, size: N(0.7, 1.2), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(0.7, 1.2), style: C(BRIDGE_STYLES), position: N(0.55, 0.9) }),
         commandSpike: M({ enabled: B(0.2), height: N(2, 5) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 0.9), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: B(0.4), count: C([0, 1, 2]), size: N(0.5, 0.9), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
@@ -179,7 +179,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Biopunk. Rounded, asymmetric hulls in deep darks, greeble-heavy skin, bioluminescent glow accents.',
     params: {
       hull: {
-        archetype: C(['sleek', 'saucer']),
+        archetype: C(['sleek', 'saucer', 'insect']),
         length: N(30, 60),
         beam: N(14, 30),
         height: N(8, 18),
@@ -193,7 +193,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.55, 0.85),
-        bridge: M({ enabled: true, size: N(0.9, 1.5), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(0.9, 1.5), style: C(BRIDGE_STYLES), position: N(0.45, 0.9) }),
         commandSpike: M({ enabled: B(0.4), height: N(3, 7) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 1.1), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: B(0.5), count: N(2, 6, true), size: N(0.7, 1.3), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
@@ -225,7 +225,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Retro-futurism. Chrome hulls, bold accent bands, prominent fins and domed bridge, atomic-age flair.',
     params: {
       hull: {
-        archetype: C(['blocky', 'saucer', 'lance']),
+        archetype: C(['blocky', 'saucer', 'lance', 'disc', 'dreadnought']),
         length: N(30, 60),
         beam: N(18, 36),
         height: N(10, 20),
@@ -239,7 +239,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.5, 0.75),
-        bridge: M({ enabled: true, size: N(1.0, 1.8), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(1.0, 1.8), style: C(BRIDGE_STYLES), position: N(0.5, 0.85) }),
         commandSpike: M({ enabled: B(0.4), height: N(4, 9), style: 'dish' }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.6, 1.2), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: B(0.5), count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
@@ -271,7 +271,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Ornate dreadnought. Tall, dark silhouette, heavy greeble, prominent command spires, brooding palette.',
     params: {
       hull: {
-        archetype: C(['dreadnought', 'lance']),
+        archetype: C(['dreadnought', 'lance', 'disc', 'wedge', 'twin', 'insect']),
         length: N(60, 110),
         beam: N(24, 48),
         height: N(18, 34),
@@ -285,7 +285,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.65, 0.9),
-        bridge: M({ enabled: true, size: N(1.2, 2), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(1.2, 2), style: C(BRIDGE_STYLES), position: N(0.55, 0.8) }),
         commandSpike: M({ enabled: true, height: N(10, 15), style: 'array' }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.6, 1.1), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: true, count: N(4, 8, true), size: N(1.0, 1.8), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
@@ -331,7 +331,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.1, 0.25),
-        bridge: M({ enabled: true, size: N(0.6, 1), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(0.6, 1), style: C(BRIDGE_STYLES), position: N(0.5, 0.85) }),
         commandSpike: M({ enabled: false, height: 1 }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 0.8), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: false, count: 0, size: 0.5 }),
@@ -363,7 +363,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Modular industrial freighter. Boxy hex hulls, heavy paneling and greebles, cargo hangar, high module density.',
     params: {
       hull: {
-        archetype: C(['blocky']),
+        archetype: C(['blocky', 'twin']),
         length: N(45, 90),
         beam: N(22, 44),
         height: N(12, 24),
@@ -377,7 +377,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.7, 0.95),
-        bridge: M({ enabled: true, size: N(1.0, 1.6), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(1.0, 1.6), style: C(BRIDGE_STYLES), position: N(0.5, 0.8) }),
         commandSpike: M({ enabled: B(0.5), height: N(4, 8) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.6, 1.1), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: B(0.4), count: N(1, 4, true), size: N(0.7, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
@@ -422,7 +422,7 @@ const AESTHETIC_DEFS = {
       },
       modules: {
         density: N(0.3, 0.7),
-        bridge: M({ enabled: true, size: N(0.7, 1.4), style: C(BRIDGE_STYLES) }),
+        bridge: M({ enabled: true, size: N(0.7, 1.4), style: C(BRIDGE_STYLES), position: N(0.4, 0.9) }),
         commandSpike: M({ enabled: B(0.5), height: N(3, 8) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 1.0), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
         weapons: M({ enabled: B(0.6), count: N(0, 4, true), size: N(0.6, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),

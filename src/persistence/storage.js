@@ -44,7 +44,4 @@ export const storage = {
     await db.put(PRESETS_STORE, record)
     return record.id
   },
-  loadPreset: (id) => db.get(PRESETS_STORE, id),
-  listPresets: () => db.all(PRESETS_STORE),
-  deletePreset: (id) => db.delete(PRESETS_STORE, id),
 }

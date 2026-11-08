@@ -8,10 +8,8 @@
 //     pick(arr): element of arr,
 //     chance(p): boolean (true with probability p),
 //     bool(): boolean,
-//     gauss(mean, std): normally-distributed number,
-//     weighted(pairs): value from [[value, weight], ...],
 //   }
-//   hashSeed(str) -> uint32   (also exported as stringSeed)
+//   hashSeed(str) -> uint32
 //
 // Determinism: the same seed always produces the same sequence, so a saved
 // ship's config + seed can reproduce it exactly. All randomness in the
@@ -29,9 +27,6 @@ export function hashSeed(str) {
   }
   return h >>> 0
 }
-
-// Alias so either name is usable by later sub-plans.
-export const stringSeed = hashSeed
 
 // Mix a raw seed into a well-dispersed 32-bit state. xorshift32 has weak
 // seed dispersion (sequential seeds -> near-identical first outputs), so we
@@ -65,29 +60,5 @@ export function createRng(seed = 1) {
   const chance = (p) => next() < p
   const bool = () => next() < 0.5
 
-  // Box-Muller transform; consumes two uniforms per sample.
-  const gauss = (mean = 0, std = 1) => {
-    let u = 0
-    let v = 0
-    while (u === 0) u = next()
-    while (v === 0) v = next()
-    const r = Math.sqrt(-2.0 * Math.log(u))
-    const theta = 2.0 * Math.PI * v
-    return mean + std * r * Math.cos(theta)
-  }
-
-  // Pick a value by weight. `pairs` is [[value, weight], ...].
-  const weighted = (pairs) => {
-    let total = 0
-    for (const pair of pairs) total += pair[1]
-    if (total <= 0) return pairs.length ? pairs[0][0] : undefined
-    let r = next() * total
-    for (const pair of pairs) {
-      r -= pair[1]
-      if (r < 0) return pair[0]
-    }
-    return pairs[pairs.length - 1][0]
-  }
-
-  return { next, range, int, pick, chance, bool, gauss, weighted }
+  return { next, range, int, pick, chance, bool }
 }
