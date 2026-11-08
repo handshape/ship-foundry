@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@plugin "daisyui" {
+  themes: light, dark;
+  logs: false;
+}
+
+/* Ship Foundry app-wide base */
+html,
+body,
+#app {
+  height: 100%;
+}

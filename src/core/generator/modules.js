@@ -1,0 +1,2709 @@
+import * as THREE from 'three'
+import { createRng } from './rng.js'
+import { varyModuleTone } from './config.js'
+
+// SUPERSTRUCTURE & MODULES (SP-05 owns the full catalog).
+//
+// Contract:
+//   generateModules(moduleParams, hullInfo, { material } = {}) -> THREE.Group
+//   - Returns a Group in hull-local space (same space as the hull geometry).
+//   - Forward = +Z. Placement uses `hullInfo` (dimensions + anchors).
+//   - Uses the supplied `material` when given (shared with the hull), otherwise
+//     a default.
+//   - Deterministic given (moduleParams, hullInfo, rng): no Math.random.
+//
+// Catalog: bridge, commandSpike, nacelles, weapons, sensorMast,
+// antenna, hangar. Each is a builder (rng, ctx) -> THREE.Group that places
+// its meshes on the hull via the anchors. `generateModules` counts instances
+// per module from density + per-module config, then calls the builder once per
+// instance so the returned group's child count grows with density.
+//
+// Every module type is a family of distinct multi-part, multi-material,
+// multi-style geometries, so nothing is instanced: each instance is built as an
+// individual group. Correctness + per-style distinctness matter more than the
+// draw-call win (engines are few, 2..8; the other "greeble-like" repeats are
+// small counts too).
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
+const lerp = (a, b, t) => a + (b - a) * t
+const PI2 = Math.PI * 2
+
+function defaultMaterial() {
+  return new THREE.MeshStandardMaterial({ color: 0x9aa7b8, metalness: 0.5, roughness: 0.6 })
+}
+
+// Build a glow material from a single emissive colour. One colour is shared by
+// EVERY glowing part on a given ship (see `glowColor` in generateModules), so
+// a ship reads as a coherent light signature rather than a rainbow of accents.
+// `glowColor` is a hex string (palette[3]) or a number; null/undefined falls
+// back to the pre-redesign cyan.
+function makeGlowMaterial(glowColor) {
+  const emissive = glowColor === null || glowColor === undefined ? 0x36c8ff : glowColor
+  return new THREE.MeshStandardMaterial({
+    color: 0x0a1420,
+    emissive,
+    emissiveIntensity: 1.4,
+    roughness: 0.35,
+    metalness: 0.2,
+  })
+}
+
+
+// Superstructure style options. Each component gets a small family of distinct
+// base geometries; a missing/invalid `style` value falls back to the named
+// default (the pre-redesign look) in each builder.
+// Nacelle strut sweep options (how the support strut slants along the travel
+// axis). A missing/invalid value falls back to 'straight' in buildNacelle.
+export const NACELLE_STRUT_STYLES = ['forward', 'straight', 'aft']
+
+// Nacelle vertical lift options: how high the pod is raised above the centreline
+// on its strut (0 = level with the deck, 1 = raised a full hull-height). A
+// missing/invalid value falls back to 0 in buildNacelle. The strut is always long
+// enough to clear the hull's tapered flank at the pod's fore end.
+export const NACELLE_LIFT_OPTIONS = [0, 0.35, 0.7, 1]
+
+// Nacelle pod angle options: the pod's pitch about its outboard (X) axis, so a
+// nacelle can be banked up, held level, or banked down along the travel axis.
+// This helps paired nacelles clear each other (e.g. one pair level, the next
+// pair angled). A missing/invalid value falls back to 'level' in buildNacelle.
+//   up    -> fore end raised (pod noses up)
+//   level -> pod runs parallel to the hull (the pre-redesign behaviour)
+//   down  -> fore end lowered (pod noses down)
+export const NACELLE_ANGLE_OPTIONS = ['up', 'level', 'down']
+
+// Nacelle trailing-end (aft cap) options: the shape of the pod's aft end (-Z).
+// A missing/invalid value falls back to 'dome' in buildNacelle. The pod body is
+// tapered (narrower at the fore end); these caps finish the aft end in a
+// distinct form so a ship's nacelles read as a varied set:
+//   dome     -> a glowing hemisphere (mirrors the fore dome, a bright exhaust cap)
+//   point    -> a tapered cone to a sharp point (a needle-like exhaust tip)
+//   scallop  -> a recessed, scalloped cut-out: a ring with a glowing concave dish
+//   flared   -> a flared bell/cone that widens aft (a nozzle-like exhaust)
+//   vented   -> a flat cap with a glowing central port + a ring of small vents
+export const NACELLE_TAIL_OPTIONS = ['dome', 'point', 'scallop', 'flared', 'vented']
+// The pod's BODY type: 'standard' is the current long tapered cylinder pod;
+// 'crystal' is a faceted hexagonal prism with pointed caps at both ends (the old
+// crystal engine, now a nacelle pod). Independent of mount — a crystal pod can
+// be pylon/aft/waist mounted.
+export const NACELLE_TYPES = ['standard', 'crystal']
+// The pod's MOUNT configuration (replaces the old engineBlocks system): the
+// three propulsion layouts a ship can have. Only one mount per ship.
+//   pylon -> long pods on swept struts off the flank (the current nacelle look).
+//   aft   -> short stubby pods mounted at the stern, no nose components.
+//   waist -> a set of pods mounted directly on the hull's waist (midship flank).
+export const NACELLE_MOUNTS = ['pylon', 'aft', 'waist']
+
+export const BRIDGE_STYLES = ['faceted', 'dome', 'nose', 'capsule', 'pillbox']
+export const COMMAND_SPIKE_STYLES = ['spike', 'dish', 'array']
+export const HANGAR_STYLES = ['bay', 'pod', 'dock']
+export const HANGAR_POSITIONS = ['side', 'nose', 'chin', 'belly']
+export const SENSOR_MAST_STYLES = ['mast', 'pole', 'ring']
+export const ANTENNA_STYLES = ['whip', 'array', 'dish']
+
+// Weapon style options (mirror of the other component STYLES). Every weapon
+// style keeps its barrel aligned along the axis of travel (+Z, the ship's
+// forward); the styles differ in turret/gunhouse silhouette, barrel, and any
+// emissive tip. A missing/invalid value falls back to 'turret' (the default) in
+// buildWeapon.
+//
+// Turret / gunhouse families (distinct housings, mat + a +Z barrel):
+//   turret, twinTurret, boxy, dome, angular
+// Cannon family (thinner barrels, some with emissive tips):
+//   cannon, longCannon, muzzleBrake, suppressor, dish, tipGlow
+//   railgun (long thin rail + glowing channel, kept from before)
+export const WEAPON_STYLES = [
+  'turret',
+  'twinTurret',
+  'boxy',
+  'dome',
+  'angular',
+  'cannon',
+  'longCannon',
+  'muzzleBrake',
+  'suppressor',
+  'dish',
+  'tipGlow',
+  'railgun',
+]
+
+// Where on the hull the weapons are mounted (independent of `style`, which is
+// the weapon's own geometry). A missing/invalid value falls back to 'top' in
+// buildWeapon. `chin` = forward-bottom (under the nose), `belly` = ventral keel
+// line, `top` = the classic upper girdle ring (the pre-redesign behaviour).
+export const WEAPON_POSITIONS = ['top', 'chin', 'belly', 'nose']
+
+// Per-weapon-style glow accents. Turret/gunhouse styles are mat-only (no glow);
+// the cannon variants and railgun get an emissive tip/channel. All emissive
+// tips/channels share the ship's single emissive colour (the `glowColor`
+// threaded in by generateModules) so a ship's lights read as one signature.
+const WEAPON_GLOW_STYLES = new Set([
+  'cannon',
+  'longCannon',
+  'muzzleBrake',
+  'suppressor',
+  'dish',
+  'tipGlow',
+  'railgun',
+])
+function weaponGlowMat(style, glowColor) {
+  const s = WEAPON_STYLES.includes(style) ? style : 'turret'
+  if (!WEAPON_GLOW_STYLES.has(s)) return null // 'turret' etc. have no glow accent
+  return makeGlowMaterial(glowColor)
+}
+
+// Per-component glow: every glowing module (command spike, hangar light, sensor
+// mast, antenna, bridge windows) shares the ship's single emissive colour. The
+// `glowColor` is threaded in by generateModules; `component` is retained for
+// call-site clarity but no longer selects a distinct hue.
+function moduleGlowMat(component, glowColor) {
+  return makeGlowMaterial(glowColor)
+}
+
+// Derive a glass tint from the ship's single emissive colour: a brightened
+// version for the glass body + a darker attenuation colour so glazing reads as
+// the ship's light signature (tinted, refracting, faintly emissive) rather than
+// a fixed cyan/violet. Returns a tint/attenuation pair as THREE.Color.
+function glassTint(glowColor) {
+  const base = new THREE.Color(glowColor === null || glowColor === undefined ? 0x66d9ff : glowColor)
+  // Brighten toward white so the glass body reads as lit glazing, not a dark
+  // solid; the attenuation colour is the raw emissive hue (the deeper tint).
+  const tint = base.clone().lerp(new THREE.Color(0xffffff), 0.55)
+  const attenuation = base.clone()
+  return { tint, attenuation }
+}
+
+// Viewscreen glass: a real transmission material so bridge windows/domes read as
+// glazing (see-through, refracting, lightly tinted by the ship's emissive)
+// rather than a flat emissive slab. A faint emissive keeps a hint of "lit
+// cabin" glow. Built per-ship from the single `glowColor`.
+function glassMaterial(glowColor) {
+  const { tint, attenuation } = glassTint(glowColor)
+  return new THREE.MeshPhysicalMaterial({
+    color: tint,
+    metalness: 0.0,
+    roughness: 0.06,
+    transmission: 1.0, // fully transmissive -> glass, not a solid
+    thickness: 0.6,
+    ior: 1.45, // glass index of refraction
+    attenuationColor: attenuation,
+    attenuationDistance: 4,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.08,
+    envMapIntensity: 1.2,
+    // A whisper of emissive so the cabin reads as lit, not dead glass.
+    emissive: tint.clone().multiplyScalar(0.18),
+    emissiveIntensity: 0.25,
+    transparent: true,
+    opacity: 1.0,
+  })
+}
+
+// Crystal engine glass: a glassy, ONLY-SLIGHTLY-emissive transmission material
+// (unlike the bright glow of the other engine styles). The faint emissive +
+// transmission makes it read as a glowing crystal in the ship's signature hue.
+// Built per-ship from the single `glowColor`.
+function crystalGlassMaterial(glowColor) {
+  const { tint, attenuation } = glassTint(glowColor)
+  return new THREE.MeshPhysicalMaterial({
+    color: tint,
+    metalness: 0.0,
+    roughness: 0.08,
+    transmission: 0.92, // mostly glass
+    thickness: 1.2,
+    ior: 1.6, // crystal-like refraction
+    attenuationColor: attenuation,
+    attenuationDistance: 2.5,
+    clearcoat: 1.0,
+    clearcoatRoughness: 0.05,
+    envMapIntensity: 1.4,
+    // Slightly emissive (NOT the bright 1.4 of the glow materials).
+    emissive: tint.clone().multiplyScalar(0.55),
+    emissiveIntensity: 0.45,
+    transparent: true,
+    opacity: 1.0,
+  })
+}
+
+// Resolve an anchor vector to a finite fallback when the hull did not provide
+// it, so no NaN vertices can ever be produced.
+function resolveAnchor(anchors, name, fallback) {
+  const v = anchors?.[name]
+  if (v && Number.isFinite(v.x) && Number.isFinite(v.y) && Number.isFinite(v.z)) return v
+  return fallback
+}
+
+// --- fit guard: hull-surface query -------------------------------------------
+//
+// Modules are placed at fixed offsets from the hull ENVELOPE anchors. On some
+// bodies (saucer, wedge, insect, twin) the real surface sits INSIDE the
+// envelope, so a fixed offset can leave a module's base floating in empty
+// space. The fit guard fixes that with two complementary mechanisms:
+//
+//   1. SURFACE QUERY — makeSurfaceQuery() returns a function that, given a
+//      direction and an in-plane coordinate, reports where the ACTUAL hull
+//      surface is (not the envelope). It samples the hull group's mesh
+//      vertices (world space, the hull group is identity so hull-local ==
+//      world) into coarse z-bins, and answers the six directions the builders
+//      need: top (max Y at z), side (max |X| at z), aft (min Z), fore (max Z),
+//      plus a twin-tube query for the two side modules.
+//
+//   2. SEAT-ONTO-HULL — each builder seats its base on the queried surface and
+//      penetrates it by a small embedding depth (a fraction of the module's
+//      own size) so the base is guaranteed to touch/embed the hull even if the
+//      query is slightly off.
+//
+// The query is a pure function of (hullGroup, hullInfo, position): no
+// Math.random. When `hullGroup` is absent (backward-compatible fallback) the
+// query returns the anchor/envelope values, so the guard degrades to the
+// pre-guard behaviour.
+
+// --- truncated icosahedron (soccer ball) geometry ----------------------------
+//
+// A truncated icosahedron is formed by cutting off each vertex of a regular
+// icosahedron at 1/3 of the edge length: each original vertex becomes a regular
+// pentagon, each original triangular face becomes a regular hexagon. The result
+// is the classic "soccer ball" / "frustrated-points icosahedron" — an
+// Archimedean solid with 12 pentagons + 20 hexagons, 60 vertices, 90 edges.
+//
+// three.js has no built-in for this, so we generate it from the icosahedron's
+// own geometry: take an IcosahedronGeometry(r, 0), find its unique vertices and
+// faces, compute the trisection points along each edge, and build pentagonal
+// faces at the vertices + hexagonal faces from the original triangles. The
+// result is a BufferGeometry with flat (non-indexed) triangles so it shades as
+// distinct facets (matte, faceted look) rather than a smooth sphere.
+//
+// Deterministic (no randomness): the icosahedron is regular, so the truncation
+// is exact. `r` is the circumradius of the resulting solid (the pentagon/hexagon
+// vertices sit at radius ~r from the origin).
+function makeTruncatedIcosahedron(r) {
+  // Start from a regular icosahedron (12 vertices, 20 faces).
+  const ico = new THREE.IcosahedronGeometry(1, 0)
+  const pos = ico.attributes.position
+  // Collect unique vertices (the icosahedron's 12 corners). IcosahedronGeometry
+  // is non-indexed (each face has its own 3 verts), so dedupe by position.
+  const uniqueVerts = []
+  const vertIndex = new Map()
+  const key = (x, y, z) => `${x.toFixed(6)},${y.toFixed(6)},${z.toFixed(6)}`
+  const findOrAdd = (x, y, z) => {
+    const k = key(x, y, z)
+    if (vertIndex.has(k)) return vertIndex.get(k)
+    const idx = uniqueVerts.length
+    uniqueVerts.push(new THREE.Vector3(x, y, z).normalize().multiplyScalar(1))
+    vertIndex.set(k, idx)
+    return idx
+  }
+  // The 20 faces as [a, b, c] vertex indices (deduped).
+  const faces = []
+  for (let i = 0; i < pos.count; i += 3) {
+    const a = findOrAdd(pos.getX(i), pos.getY(i), pos.getZ(i))
+    const b = findOrAdd(pos.getX(i + 1), pos.getY(i + 1), pos.getZ(i + 1))
+    const c = findOrAdd(pos.getX(i + 2), pos.getY(i + 2), pos.getZ(i + 2))
+    if (a !== b && b !== c && a !== c) faces.push([a, b, c])
+  }
+  // The 30 edges (unique pairs of vertex indices) — each icosahedron edge is
+  // shared by exactly 2 faces.
+  const edgeSet = new Map()
+  const addEdge = (u, v) => {
+    const k = u < v ? `${u}-${v}` : `${v}-${u}`
+    if (!edgeSet.has(k)) edgeSet.set(k, [u, v])
+  }
+  for (const [a, b, c] of faces) {
+    addEdge(a, b)
+    addEdge(b, c)
+    addEdge(c, a)
+  }
+  // Truncation: cut each vertex at 1/3 of the edge length from the corner. For
+  // each edge (u, v), the two trisection points are:
+  //   p_uv = u + (v - u) / 3   (near u)
+  //   p_vu = v + (u - v) / 3   (near v)
+  // The truncated solid's 60 vertices are these trisection points.
+  // For each original vertex u, its 5 incident edges give 5 trisection points
+  // (the ones NEAR u), which form a pentagon. For each original face (a,b,c),
+  // its 3 edges give 6 trisection points (2 per edge), which form a hexagon.
+  const T = (u, v, nearU) => {
+    // Trisection point on edge (u,v), `nearU ? 1/3 from u : 1/3 from v`.
+    const a = uniqueVerts[u]
+    const b = uniqueVerts[v]
+    const t = nearU ? 1 / 3 : 2 / 3
+    return a.clone().lerp(b, t).normalize().multiplyScalar(r)
+  }
+  // Build a flat (non-indexed) triangle list.
+  const verts = []
+  const addTri = (a, b, c) => {
+    // Winding: ensure outward-facing (CCW when viewed from outside). We add the
+    // triangles in the order the source geometry gives them, which is already
+    // outward-facing for the icosahedron; the truncation preserves orientation.
+    verts.push(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z)
+  }
+  // Pentagon at each original vertex: the 5 trisection points NEAR that vertex,
+  // in the order of its incident edges (which is the CCW order around the vertex).
+  const vertEdges = new Map() // vertex idx -> array of edge [u, v] (u is the vertex)
+  for (const [u, v] of edgeSet.values()) {
+    if (!vertEdges.has(u)) vertEdges.set(u, [])
+    if (!vertEdges.has(v)) vertEdges.set(v, [])
+    vertEdges.get(u).push([u, v])
+    vertEdges.get(v).push([v, u])
+  }
+  for (let u = 0; u < uniqueVerts.length; u++) {
+    const edges = vertEdges.get(u) // 5 edges, each [u, v_k]
+    // The pentagon's 5 vertices are the trisection points NEAR u on each edge.
+    // Order them CCW around u: sort by the angle of the edge direction around u.
+    const pts = edges.map(([_, v]) => T(u, v, true))
+    // Sort CCW around u's normal (which is u's position, pointing outward).
+    const center = uniqueVerts[u].clone().normalize()
+    // Build a local frame at center to compute angles.
+    const ref = Math.abs(center.y) < 0.9 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
+    const xAxis = new THREE.Vector3().crossVectors(center, ref).normalize()
+    const yAxis = new THREE.Vector3().crossVectors(center, xAxis).normalize()
+    const ang = (p) => {
+      const d = p.clone().sub(center)
+      return Math.atan2(d.dot(yAxis), d.dot(xAxis))
+    }
+    const order = pts.map((_, i) => i).sort((i, j) => ang(pts[i]) - ang(pts[j]))
+    // Fan the pentagon into 3 triangles (vertices in CCW order).
+    for (let k = 1; k < 4; k++) {
+      addTri(pts[order[0]], pts[order[k]], pts[order[k + 1]])
+    }
+  }
+  // Hexagon at each original face: the 6 trisection points on the face's 3
+  // edges, in CCW order. For face (a, b, c) with edges (a,b), (b,c), (c,a):
+  // the 6 points are, in CCW order around the face:
+  //   T(a,b,near a), T(b,c,near b), T(c,a,near c),
+  //   T(a,b,near b), T(b,c,near c), T(c,a,near a)
+  // (going around the face, alternating near-vertex points).
+  for (const [a, b, c] of faces) {
+    const p1 = T(a, b, true)  // near a, on edge (a,b)
+    const p2 = T(b, c, true)  // near b, on edge (b,c)
+    const p3 = T(c, a, true)  // near c, on edge (c,a)
+    const p4 = T(a, b, false) // near b, on edge (a,b)
+    const p5 = T(b, c, false) // near c, on edge (b,c)
+    const p6 = T(c, a, false) // near a, on edge (c,a)
+    // CCW order around the face: p1 (near a on ab), p4 (near b on ab),
+    // p2 (near b on bc), p5 (near c on bc), p3 (near c on ca), p6 (near a on ca)
+    const hex = [p1, p4, p2, p5, p3, p6]
+    // Fan the hexagon into 4 triangles.
+    for (let k = 1; k < 5; k++) {
+      addTri(hex[0], hex[k], hex[k + 1])
+    }
+  }
+  ico.dispose()
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3))
+  geo.computeVertexNormals()
+  return geo
+}
+
+function makeSurfaceQuery(hullGroup, hullInfo) {
+  const top = resolveAnchor(hullInfo.anchors, 'top', new THREE.Vector3(0, 0, 0))
+  const bottom = resolveAnchor(hullInfo.anchors, 'bottom', new THREE.Vector3(0, 0, 0))
+  const port = resolveAnchor(hullInfo.anchors, 'port', new THREE.Vector3(-1, 0, 0))
+  const starboard = resolveAnchor(hullInfo.anchors, 'starboard', new THREE.Vector3(1, 0, 0))
+  const fore = resolveAnchor(hullInfo.anchors, 'fore', new THREE.Vector3(0, 0, 0))
+  const aft = resolveAnchor(hullInfo.anchors, 'aft', new THREE.Vector3(0, 0, 0))
+  const halfLen = (hullInfo.length ?? 40) / 2
+
+  // Sample the hull meshes' vertices into z-bins (one bin per 1% of length).
+  // The hull group is added to the ship at identity, so its world positions are
+  // hull-local. We keep per-bin extrema only — the query below is exact against
+  // the sampled vertices (deterministic, no random).
+  const NBINS = 200
+  const bins = []
+  for (let b = 0; b < NBINS; b++) {
+    bins.push({ minY: Infinity, maxY: -Infinity, minX: Infinity, maxX: -Infinity, count: 0 })
+  }
+  const binIndex = (z) => {
+    const f = (z + halfLen) / (2 * halfLen) // 0 at stern .. 1 at nose
+    return Math.max(0, Math.min(NBINS - 1, Math.floor(f * NBINS)))
+  }
+  const zAtBin = (b) => -halfLen + ((b + 0.5) / NBINS) * (2 * halfLen)
+
+  let hasGeometry = false
+  if (hullGroup) {
+    const v = new THREE.Vector3()
+    hullGroup.traverse((o) => {
+      if (!o.isMesh) return
+      const g = o.geometry
+      if (!g) return
+      const pos = g.attributes?.position
+      if (!pos || pos.count === 0) return
+      const mat4 = new THREE.Matrix4()
+      o.updateWorldMatrix(true, false)
+      mat4.copy(o.matrixWorld)
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(mat4)
+        const bin = bins[binIndex(v.z)]
+        if (v.y < bin.minY) bin.minY = v.y
+        if (v.y > bin.maxY) bin.maxY = v.y
+        if (v.x < bin.minX) bin.minX = v.x
+        if (v.x > bin.maxX) bin.maxX = v.x
+        bin.count++
+        hasGeometry = true
+      }
+    })
+  }
+
+  // For an empty z-bin, linearly interpolate the nearest non-empty neighbours'
+  // extrema so the query is smooth (and falls back to the envelope if every
+  // bin is empty).
+  const interp = (b, key, fallback) => {
+    if (bins[b].count > 0) return bins[b][key]
+    let lo = b - 1
+    while (lo >= 0 && bins[lo].count === 0) lo--
+    let hi = b + 1
+    while (hi < NBINS && bins[hi].count === 0) hi++
+    if (lo < 0 && hi >= NBINS) return fallback
+    if (lo < 0) return bins[hi][key]
+    if (hi >= NBINS) return bins[lo][key]
+    const t = (zAtBin(b) - zAtBin(lo)) / (zAtBin(hi) - zAtBin(lo))
+    return lerp(bins[lo][key], bins[hi][key], clamp(t, 0, 1))
+  }
+
+  // Nearest hull surface extent in a given direction at a z. `dir` is one of
+  // 'top' | 'bottom' | 'side' | 'aft' | 'fore'. Returns the surface coordinate
+  // in that direction (a signed Y, |X|, or Z). Pure in (hullGroup, hullInfo, z).
+  function surfaceAt(dir, z) {
+    const b = binIndex(z)
+    switch (dir) {
+      case 'top':
+        return hasGeometry ? interp(b, 'maxY', top.y) : top.y
+      case 'bottom':
+        return hasGeometry ? interp(b, 'minY', bottom.y) : bottom.y
+      case 'side': {
+        const mx = hasGeometry ? Math.abs(interp(b, 'maxX', starboard.x)) : Math.abs(starboard.x)
+        const mn = hasGeometry ? Math.abs(interp(b, 'minX', port.x)) : Math.abs(port.x)
+        return Math.max(mx, mn)
+      }
+      case 'aft':
+        // Furthest aft (-Z) hull point at this z; clamp so the result never
+        // runs past the requested z (engines are placed at/inside the stern).
+        return hasGeometry ? Math.min(aft.z, z) : Math.min(aft.z, z)
+      case 'fore':
+        return hasGeometry ? fore.z : fore.z
+      default:
+        return 0
+    }
+  }
+
+  // For twin (two side tubes at ±beam*0.28), 'side' returns the max |X| extent
+  // at that z, which is the OUTER tube's surface. A side module seated at that
+  // extent (and embedded inward) therefore attaches to the nearest tube, not
+  // the gap between the tubes.
+
+  // The hull's full cross-section girth (min of the half-beam and half-height
+  // extents) at a z, for modules that wrap the hull (the aft engine ring).
+  // Uses INTERPOLATED half-extents at the exact Z (via `interp`) so the girth
+  // is smooth across all Z values, not just the discrete station rings. A
+  // windowed max over nearby non-empty bins (the old approach) under-reads the
+  // true girth for tapered sterns because most bins are empty (the lofted hull
+  // has only ~14 station rings). The floor is small (5% of the envelope) so it
+  // guards against a degenerate zero without over-sizing pods for archetypes
+  // with small sterns.
+  function girthAt(z) {
+    const b0 = binIndex(z)
+    const halfBeam = (hullInfo.beam ?? 14) / 2
+    const halfHeight = (hullInfo.height ?? 8) / 2
+    if (!hasGeometry) return Math.min(halfBeam, halfHeight) * 0.1
+    const halfX = Math.max(
+      Math.abs(interp(b0, 'maxX', halfBeam)),
+      Math.abs(interp(b0, 'minX', -halfBeam))
+    )
+    const halfY = Math.max(
+      Math.abs(interp(b0, 'maxY', halfHeight)),
+      Math.abs(interp(b0, 'minY', -halfHeight))
+    )
+    const girth = Math.min(halfX, halfY)
+    const floor = Math.min(halfBeam, halfHeight) * 0.05
+    return Math.max(girth, floor)
+  }
+
+  // The hull's max side extent (max |X|) at a Z, using a windowed max over nearby
+  // bins. A single bin can under-read the hull on smooth/domed archetypes (e.g.
+  // saucer) where vertex distribution is uneven — some bins get vertices from
+  // the curved surface at a smaller radius than the true flank. The windowed max
+  // captures the fuller flank so side-mounted pods (waist/pylon) sit on the hull
+  // surface rather than inside it.
+  function maxSideAt(z, winFrac = 0.04) {
+    const b0 = binIndex(z)
+    const w = Math.max(1, Math.round(NBINS * winFrac))
+    let best = 0
+    for (let b = b0 - w; b <= b0 + w; b++) {
+      if (b < 0 || b >= NBINS || bins[b].count === 0) continue
+      best = Math.max(best, Math.max(Math.abs(bins[b].maxX), Math.abs(bins[b].minX)))
+    }
+    const halfBeam = (hullInfo.beam ?? 14) / 2
+    return Math.max(hasGeometry ? best : 0, halfBeam * 0.5)
+  }
+
+  // The Z (within a window around `z`) where the hull's girth is maximal, for
+  // placing the aft engine ring on a real cross-section. Scans a window of bins
+  // around `z`, but only considers NON-EMPTY bins (actual station rings with
+  // vertices). For each candidate, computes the INTERPOLATED girth (via
+  // `girthAt`/`interp`, which is smooth across all Z values). This keeps the
+  // ring on a real hull cross-section (a station ring) rather than in a
+  // vertexless gap between rings where the interpolated surface may be much
+  // smaller than the interpolated value suggests.
+  function bestGirthZ(z, winFrac = 0.12) {
+    const b0 = binIndex(z)
+    const w = Math.max(1, Math.round(NBINS * winFrac))
+    let bestBin = b0
+    let bestGirth = -Infinity
+    for (let b = b0 - w; b <= b0 + w; b++) {
+      if (b < 0 || b >= NBINS || bins[b].count === 0) continue
+      const girth = girthAt(zAtBin(b))
+      if (girth > bestGirth) {
+        bestGirth = girth
+        bestBin = b
+      }
+    }
+    return zAtBin(bestBin)
+  }
+
+  // The hull's surface distance from the centreline in the X-Y direction `angle`
+  // (radians, 0 = +X/starboard, PI/2 = +Y/top) at a given Z, for the aft engine
+  // ring. The hull's cross-section is anisotropic (beam != height), so a pod at
+  // angle `angle` sits on the hull surface at a radius that depends on `angle`.
+  //
+  // The lofted hulls are built from discrete station rings (typically ~14 along
+  // the length). Between rings the surface is bilinearly interpolated but has no
+  // vertices, so the z-bins in `makeSurfaceQuery` are sparse — most bins are
+  // empty. A windowed max over nearby non-empty bins (the old approach)
+  // under-reads the true cross-section for tapered sterns: the bin extrema are
+  // the max |x| and max |y| at a ring, but a pod at a diagonal angle (e.g. 45°)
+  // sits at a smaller radius than either extreme, and the bin's min/max
+  // rectangle over-estimates the true surface there.
+  //
+  // Instead we INTERPOLATE the half-extents (halfX, halfY) at the exact Z using
+  // the surrounding station rings (via `interp`), then compute the surface
+  // radius from the elliptical cross-section formula:
+  //   r = 1 / sqrt( (cos²a)/halfX² + (sin²a)/halfY² )
+  // This gives the true surface distance in the pod's direction at the pod's Z,
+  // smooth across all Z values (not just the discrete ring stations).
+  //
+  // TWO-TUBE HULLS (archetype 'twin'): the cross-section is two parallel tubes,
+  // not a single ellipse. A pod at a diagonal angle sits in the gap between
+  // the tubes. We detect this by checking the X-coverage of the bin's vertices:
+  // if the fraction of the X range that contains vertices is low (< 0.65), the
+  // section has a gap. For a two-tube section, the pod is placed on the nearest
+  // tube's surface (the tube on the pod's side of the centreline).
+  function surfaceRadiusAt(angle, z) {
+    const b0 = binIndex(z)
+    const cosA = Math.cos(angle)
+    const sinA = Math.sin(angle)
+    const halfBeam = (hullInfo.beam ?? 14) / 2
+    const halfHeight = (hullInfo.height ?? 8) / 2
+    if (!hasGeometry) return Math.min(halfBeam, halfHeight) * 0.1
+    // Interpolated half-extents at this Z (linear between surrounding rings).
+    const halfX = Math.max(
+      Math.abs(interp(b0, 'maxX', halfBeam)),
+      Math.abs(interp(b0, 'minX', -halfBeam))
+    )
+    const halfY = Math.max(
+      Math.abs(interp(b0, 'maxY', halfHeight)),
+      Math.abs(interp(b0, 'minY', -halfHeight))
+    )
+    // Two-tube detection: check the X-coverage of the bin's vertices. If the
+    // fraction of the X range that contains vertices is low, the section has a
+    // gap (two tubes). We detect this by the archetype: if hullInfo.archetype
+    // is 'twin', the cross-section is two tubes and we place the pod on the
+    // nearest tube's surface.
+    const isTwin = hullInfo.archetype === 'twin'
+    if (isTwin) {
+      // For a two-tube section, the tube on the pod's side (sign of cosA) is
+      // approximately a circle of radius tubeR centered at (tubeCx, 0), where
+      // tubeCx ≈ 3*halfX/4 and tubeR ≈ halfX/4 (the tube spans [halfX/2, halfX]
+      // in X, centered at 3*halfX/4 with radius halfX/4). The pod at angle
+      // `angle` in the X-Y plane has coordinates (cosA*r, sinA*r). For the pod
+      // to be on the tube's surface:
+      //   (cosA*r - tubeCx)² + (sinA*r)² = tubeR²
+      // Expanding: r² - 2* tubeCx * cosA * r + tubeCx² - tubeR² = 0
+      // Solving the quadratic: r = tubeCx*cosA ± sqrt((tubeCx*cosA)² - tubeCx² + tubeR²)
+      // We take the larger root (the outer surface).
+      const tubeCx = halfX * 0.75
+      const tubeR = halfX * 0.25
+      const a = cosA
+      const b = -2 * tubeCx * a
+      const c = tubeCx * tubeCx - tubeR * tubeR
+      const disc = b * b - 4 * c
+      let r
+      if (disc >= 0) {
+        r = (-b + Math.sqrt(disc)) / 2
+      } else {
+        // No intersection (the ray misses the tube) — fall back to the
+        // tube's outer edge in the X direction.
+        r = tubeCx + tubeR
+      }
+      const floor = Math.min(halfBeam, halfHeight) * 0.05
+      return Math.max(r, floor)
+    }
+    // Elliptical cross-section: the surface radius in direction (cosA, sinA).
+    // Degenerate cases: pod aligned with an axis → the half-extent itself.
+    const cos2 = cosA * cosA
+    const sin2 = sinA * sinA
+    const denom = cos2 / (halfX * halfX) + sin2 / (halfY * halfY)
+    if (denom < 1e-12) return 0
+    let r = 1 / Math.sqrt(denom)
+    // The insect hull is a chain of overlapping ellipsoids. The bin extrema
+    // capture the max |x| and |y| at a Z, but the ellipsoids' bulges mean the
+    // actual surface can be slightly larger than the single-ellipse formula
+    // predicts (the bulge peaks between the bin's sample points). A small boost
+    // (5%) keeps the pod outboard of the hull's actual surface.
+    if (hullInfo.archetype === 'insect') r *= 1.11
+    // Small floor guards against a degenerate zero (e.g. a perfectly flat stern
+    // cap with no cross-section at the exact Z). Does not push the pod
+    // outboard of the real hull.
+    const floor = Math.min(halfBeam, halfHeight) * 0.05
+    return Math.max(r, floor)
+  }
+
+  return { surfaceAt, girthAt, surfaceRadiusAt, bestGirthZ, maxSideAt, hasGeometry }
+}
+
+// --- module builders ---------------------------------------------------------
+
+// Bridge: superstructure, on the deck (top anchor) toward the fore (+Z).
+// `t` is the normalized z of this instance (0.62 = main bridge at density 1; a
+// second instance sits further aft). A family of four distinct silhouettes, each
+// multi-part and multi-material (hull `mat` + glass viewscreens + a glowing
+// accent):
+//   faceted (default): an angular, bevelled cockpit — chamfered hull body with a
+//                      multi-faceted glass windshield (the "block" box, retired).
+//   sweep:             a rounded, streamlined canopy that tapers toward the bow.
+//   dome:              a rounded glass dome on a low deck collar.
+//   spire:             a tapered command tower + glowing window ring + tip beacon.
+function buildBridge(rng, ctx) {
+  const { mat, glowMat, hull, fore, surface, glowColor } = ctx
+  const cfg = ctx.params.bridge
+  const style = BRIDGE_STYLES.includes(cfg.style) ? cfg.style : 'faceted'
+  const t = ctx.t
+  const s = cfg.size ?? 1
+  const w = hull.beam * 0.3 * s
+  const h = hull.height * 0.35 * s
+  const d = hull.length * 0.16 * s
+  const z = lerp(0, fore.z, t)
+  // FIT GUARD: seat the bridge base on the real deck height at this z, not the
+  // envelope top anchor (which can be higher on saucer/wedge/insect). The
+  // embedding is a fraction of the module's own height so the base penetrates
+  // the hull by a meaningful depth (guaranteed contact even if the query is
+  // slightly off).
+  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const glass = glassMaterial(glowColor)
+  const base = { mat, glowMat, glass, hull, s, w, h, d, z, topY: baseY, fore }
+
+  switch (style) {
+    case 'dome':
+      return buildBridgeDome(base)
+    case 'nose':
+      return buildBridgeNose(base)
+    case 'capsule':
+      return buildBridgeCapsule(rng, base)
+    case 'pillbox':
+      return buildBridgePillbox(base)
+    case 'faceted':
+    default:
+      return buildBridgeFaceted(base)
+  }
+}
+
+// Nose: a forward cockpit hunched on the very tip of the hull — the bridge sits
+// at the bow rather than midship, reading as a low, pointed glass cockpit that
+// tapers into the nose. Always placed at the hull's fore tip (fore.z), ignoring
+// the per-instance `t`, so it crowns the nose regardless of count/density.
+function buildBridgeNose(b) {
+  const { mat, glowMat, glass, w, h, d, topY, fore } = b
+  const group = new THREE.Group()
+  group.name = 'bridge:nose'
+
+  // Seat the cockpit at the hull's very tip: the fore anchor's z, pulled back a
+  // fraction of the cockpit depth so the base embeds into the nose (not floating
+  // past it). The deck height at the tip (topY) is the local reference.
+  const tipZ = fore.z - d * 0.2
+  const tipY = topY + h * 0.1
+
+  // A short, low mat collar hunched at the very tip of the deck.
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.5, w * 0.62, h * 0.34, 8), mat)
+  collar.name = 'bridgeNoseCollar'
+  collar.position.set(0, tipY + h * 0.2, tipZ - d * 0.1)
+  group.add(collar)
+
+  // A faceted glass canopy (glass), pointed toward the bow (stretched +Z) so it
+  // reads as a nose cone rather than a dome.
+  const canopyR = w * 0.5
+  const canopy = new THREE.Mesh(new THREE.IcosahedronGeometry(canopyR, 0), glass)
+  canopy.name = 'bridgeNoseGlass'
+  canopy.scale.set(w / canopyR, (h * 0.55) / canopyR, (d * 0.7) / canopyR)
+  canopy.position.set(0, tipY + h * 0.4, tipZ)
+  group.add(canopy)
+
+  // A thin glowing visor line (glow) at the canopy's base.
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(w * 0.42, h * 0.05, d * 0.6), glowMat)
+  visor.name = 'bridgeNoseVisor'
+  visor.position.set(0, tipY + h * 0.3, tipZ - d * 0.05)
+  group.add(visor)
+
+  return group
+}
+
+// Faceted (default): a gem-like, bevelled cockpit built from a faceted
+// (icosahedron) hull body (mat) with a faceted glass canopy (glass) and a thin
+// glowing visor line (glow). The body is a flat-topped icosahedron squashed into
+// a low, angular superstructure; the canopy is a smaller faceted glass dome set
+// into its top — a proper multi-facet silhouette, not a box.
+function buildBridgeFaceted(b) {
+  const { mat, glowMat, glass, w, h, d, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'bridge:faceted'
+
+  // Faceted hull body: a TRUNCATED icosahedron (soccer ball — 12 pentagons +
+  // 20 hexagons, "frustrated points"), squashed low (y) and stretched along the
+  // travel axis (z) so it reads as a low, angular superstructure with bevelled,
+  // multi-facet sides rather than sharp icosahedron points.
+  const bodyR = Math.min(w, d) * 0.62
+  const body = new THREE.Mesh(makeTruncatedIcosahedron(bodyR), mat)
+  body.name = 'bridgeBody'
+  body.scale.set(w / bodyR, (h * 0.55) / bodyR, d / bodyR)
+  body.position.set(0, topY + h * 0.42, z)
+  group.add(body)
+
+  // A flat deck collar (mat) under the canopy so the glass sits in a rim.
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.4, w * 0.46, h * 0.16, 6), mat)
+  collar.name = 'bridgeFacetedCollar'
+  collar.position.set(0, topY + h * 0.72, z)
+  group.add(collar)
+
+  // Faceted glass canopy: a smaller TRUNCATED icosahedron (glass) crowning the
+  // body, squashed to a low dome and stretched toward the bow — a soccer-ball
+  // glass dome rather than a sharp icosahedron.
+  const glassR = bodyR * 0.62
+  const canopy = new THREE.Mesh(makeTruncatedIcosahedron(glassR), glass)
+  canopy.name = 'bridgeGlass'
+  canopy.scale.set(w / (glassR * 1.4), (h * 0.4) / glassR, d / (glassR * 1.2))
+  canopy.position.set(0, topY + h * 0.86, z + d * 0.05)
+  group.add(canopy)
+
+  // A thin glowing visor line (glow) along the canopy's base.
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(w * 0.5, h * 0.05, d * 0.7), glowMat)
+  visor.name = 'bridgeVisor'
+  visor.position.set(0, topY + h * 0.78, z + d * 0.03)
+  group.add(visor)
+
+  return group
+}
+
+// Dome: a rounded glass dome (glass) on a low deck collar (mat).
+function buildBridgeDome(b) {
+  const { mat, glass, w, h, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'bridge:dome'
+
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.62, w * 0.7, h * 0.3, 16), mat)
+  collar.name = 'bridgeDomeCollar'
+  collar.position.set(0, topY + (h * 0.3) / 2, z)
+  group.add(collar)
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(w * 0.55, 24, 12, 0, PI2, 0, Math.PI * 0.5),
+    glass,
+  )
+  dome.name = 'bridgeDome'
+  dome.scale.y = h / (w * 1.1)
+  dome.position.set(0, topY + h * 0.3, z)
+  group.add(dome)
+
+     return group
+}
+
+// Capsule: a geometric capsule on a neck — a Star Wars TIE-bridge aesthetic.
+// The capsule is a squashed prism of a regular polygon (even sides: 6 or 8)
+// extruded along the travel axis (+Z), with a flat face on top and a flat
+// face fore (aligned with the slit). Some capsules are enclosed glass
+// cockpits (glass material), others are matte prisms (mat). Two neck styles:
+//   round:  a short tapered cylinder with a flange (classic).
+//   wedge:  a triangular prism extruded in X, with its bottom face flush
+//           (or slightly embedded) in the hull and its apex reaching into
+//           the capsule. The apex has random play in the Y-Z plane.
+function buildBridgeCapsule(rng, b) {
+  const { mat, glowMat, glass, w, h, d, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'bridge:capsule'
+
+  const isGlass = rng.chance(0.4)
+  const capsuleMat = isGlass ? glass : mat
+  const sides = rng.int(3, 4) * 2
+  const rotY = Math.PI / sides
+  const capsuleR = w * 0.42
+  const capsuleLen = d * 0.7
+  const xStretch = 1.35
+
+  const neckStyle = rng.chance(0.5) ? 'wedge' : 'round'
+  let capY, capZ = z
+
+  if (neckStyle === 'wedge') {
+    // Triangular-prism neck: cross-section in the Y-Z plane, extruded in X.
+    // Bottom edge flush with (or slightly inside) the deck; apex reaches
+    // into the capsule. The apex has random play in Y and Z.
+    const wedgeHalfW = w * 0.45
+    const wedgeH = h * 0.5
+    const apexY = topY + wedgeH + rng.range(-h * 0.04, h * 0.06)
+    const apexZ = z + rng.range(-d * 0.06, d * 0.06)
+    const botY = topY - h * 0.03
+
+    const shape = new THREE.Shape()
+    shape.moveTo(-wedgeHalfW, botY)
+    shape.lineTo(wedgeHalfW, botY)
+    shape.lineTo(0, apexY)
+    shape.closePath()
+
+    // Extrude the triangle along +Z (shape normal), then rotate so the
+    // extrusion runs along +X. rotation.y = -PI/2 maps:
+    //   +Z (extrusion) -> +X, +X (shape) -> -Z, Y -> Y.
+    const prismDepth = wedgeHalfW * 2
+    const prismGeo = new THREE.ExtrudeGeometry(shape, { depth: prismDepth, bevelEnabled: false })
+    const wedge = new THREE.Mesh(prismGeo, mat)
+    wedge.name = 'bridgeCapsuleNeckWedge'
+    wedge.rotation.y = -Math.PI / 2
+    // Center the extrusion in X: the shape's local Z (extrusion) runs 0..depth
+    // which becomes world X 0..depth after rotation. Offset by -depth/2.
+    wedge.position.x = -prismDepth / 2
+    group.add(wedge)
+
+    capY = apexY + capsuleR * 0.15
+    capZ = apexZ
+  } else {
+    // Round neck: a tapered cylinder rising from the deck, flaring at the base.
+    const neckH = h * 0.4
+    const neckTopR = w * 0.24
+    const neckBotR = w * 0.38
+    const neck = new THREE.Mesh(new THREE.CylinderGeometry(neckTopR, neckBotR, neckH, 8), mat)
+    neck.name = 'bridgeCapsuleNeck'
+    neck.position.set(0, topY + neckH * 0.5, z)
+    group.add(neck)
+
+    const flange = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.48, w * 0.55, h * 0.07, 8), mat)
+    flange.name = 'bridgeCapsuleFlange'
+    flange.position.set(0, topY + h * 0.035, z)
+    group.add(flange)
+
+    capY = topY + neckH + capsuleR * 0.9
+  }
+
+  // Capsule: a regular polygon (6 or 8 sides) extruded along +Z, stretched
+  // in X so it reads as wide enough to hold a deck inside.
+  const capsule = new THREE.Mesh(new THREE.CylinderGeometry(capsuleR, capsuleR, capsuleLen, sides), capsuleMat)
+  capsule.name = isGlass ? 'bridgeCapsuleGlass' : 'bridgeCapsulePrism'
+  capsule.scale.set(xStretch, 1, 1)
+  capsule.rotation.y = rotY
+  capsule.rotation.x = Math.PI / 2
+  capsule.position.set(0, capY, capZ)
+  group.add(capsule)
+
+  // For the glass variant: a faceted cone tip pointing fore (+Z).
+  if (isGlass) {
+    const capR = capsuleR * 0.9
+    const capLen = capsuleLen * 0.3
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(capR, capLen, sides), glass)
+    cap.name = 'bridgeCapsuleCap'
+    cap.scale.set(xStretch, 1, 1)
+    cap.rotation.y = rotY
+    cap.rotation.x = Math.PI / 2
+    cap.position.set(0, capY, capZ + capsuleLen * 0.5 + capLen * 0.5)
+    group.add(cap)
+  } else {
+    for (const [name, dz] of [['bridgeCapsulePrismCapFore', 1], ['bridgeCapsulePrismCapAft', -1]]) {
+      const endCap = new THREE.Mesh(new THREE.CylinderGeometry(capsuleR, capsuleR, h * 0.04, sides), mat)
+      endCap.name = name
+      endCap.scale.set(xStretch, 1, 1)
+      endCap.rotation.y = rotY
+      endCap.rotation.x = Math.PI / 2
+      endCap.position.set(0, capY, capZ + dz * (capsuleLen * 0.5 + h * 0.02))
+      group.add(endCap)
+    }
+  }
+
+  // Narrow luminous slit on the capsule's fore flat face (+Z).
+  const slitW = capsuleR * 0.6 * xStretch
+  const slitH = h * 0.04
+  const slit = new THREE.Mesh(new THREE.BoxGeometry(slitW, slitH, h * 0.015), glowMat)
+  slit.name = 'bridgeCapsuleSlit'
+  const foreFaceZ = capZ + capsuleLen * 0.5 + (isGlass ? capsuleLen * 0.3 * 0.85 : h * 0.05)
+  slit.position.set(0, capY, foreFaceZ)
+  group.add(slit)
+
+  return group
+}
+
+// Pillbox: a low, wide hexagonal superstructure (mat) with sloped faces and a
+// narrow forward-facing luminous slit. The body is a frustum (wider at the
+// base, narrower at the top) so all side faces slope inward, giving the
+// pillbox an angular, tapered profile rather than flat vertical walls.
+function buildBridgePillbox(b) {
+  const { mat, glowMat, w, h, d, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'bridge:pillbox'
+
+  // Low deck collar (mat) under the pillbox body.
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.55, w * 0.65, h * 0.18, 6), mat)
+  collar.name = 'bridgePillboxCollar'
+  collar.position.set(0, topY + h * 0.09, z)
+  group.add(collar)
+
+  // The pillbox body: a hexagonal frustum (6 sides), wider at the base and
+  // narrower at the top, so all side faces slope inward. Stretched along the
+  // travel axis so it reads as a flat command deck.
+  const bodyR = w * 0.52
+  const bodyTopR = w * 0.38
+  const bodyH = h * 0.55
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(bodyTopR, bodyR, bodyH, 6), mat)
+  body.name = 'bridgePillboxBody'
+  body.scale.set(1, 1, d / (bodyR * 2))
+  body.position.set(0, topY + h * 0.18 + bodyH * 0.5, z)
+  group.add(body)
+
+  // Narrow forward-facing luminous slit on the sloped front face (+Z).
+  // The frustum's front face slopes inward, so the slit is positioned at the
+  // mid-height radius (average of top and base) and pushed slightly forward
+  // to sit on the sloped surface.
+  const slitW = w * 0.5
+  const slitH = h * 0.04
+  const midR = (bodyR + bodyTopR) * 0.5
+  const frontZ = z + midR * (d / (bodyR * 2)) * 0.866 + h * 0.01
+  const slit = new THREE.Mesh(new THREE.BoxGeometry(slitW, slitH, h * 0.02), glowMat)
+  slit.name = 'bridgePillboxSlit'
+  slit.position.set(0, topY + h * 0.18 + bodyH * 0.5, frontZ)
+  group.add(slit)
+
+  return group
+}
+
+// Command spike: tall mast rising from the top anchor near the fore. A family
+// of three distinct silhouettes, each multi-part and multi-material (hull `mat`
+// + the command-spike green glow accent):
+//   spike (default): the existing tapered mast + glowing sensor dome.
+//   dish:            a mast topped by a glowing parabolic sensor bowl + feed arm.
+//   array:           a mast with a stack of glowing sensor plates + mat cross-bars.
+function buildCommandSpike(rng, ctx) {
+  const { mat, hull, fore, surface, glowColor } = ctx
+  const cfg = ctx.params.commandSpike
+  const style = COMMAND_SPIKE_STYLES.includes(cfg.style) ? cfg.style : 'spike'
+  const glowMat = moduleGlowMat('commandSpike', glowColor)
+  const t = ctx.t
+  const s = cfg.height / 6
+  const h = hull.height * 1.1 * s
+  const z = lerp(0, fore.z, t)
+  // FIT GUARD: the spike's base (mast bottom) embeds into the real deck height
+  // by a fraction of its own height (guaranteed contact).
+  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const base = { mat, glowMat, hull, s, h, z, topY: baseY }
+
+  switch (style) {
+    case 'dish':
+      return buildCommandSpikeDish(base)
+    case 'array':
+      return buildCommandSpikeArray(base)
+    case 'spike':
+    default:
+      return buildCommandSpikeSpike(base)
+  }
+}
+
+// Spike (default): the existing tapered mast + glowing sensor dome.
+function buildCommandSpikeSpike(b) {
+  const { mat, glowMat, hull, s, h, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'commandSpike:spike'
+
+  const spike = new THREE.Mesh(
+    new THREE.CylinderGeometry(hull.beam * 0.02 * s + 0.1, hull.beam * 0.05 * s + 0.2, h, 6),
+    mat
+  )
+  spike.name = 'spikeMast'
+  spike.position.set(0, topY + h / 2, z)
+  group.add(spike)
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(hull.beam * 0.045 * s + 0.15, 10, 6, 0, PI2, 0, Math.PI * 0.5),
+    glowMat
+  )
+  dome.name = 'spikeSensor'
+  dome.position.set(0, topY + h, z)
+  group.add(dome)
+
+  return group
+}
+
+// Dish: a mast (mat) topped by a glowing parabolic sensor bowl (glow) + a feed
+// arm (mat) with a glowing feed node.
+function buildCommandSpikeDish(b) {
+  const { mat, glowMat, hull, s, h, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'commandSpike:dish'
+
+  const mast = new THREE.Mesh(
+    new THREE.CylinderGeometry(hull.beam * 0.02 * s + 0.08, hull.beam * 0.05 * s + 0.15, h, 6),
+    mat
+  )
+  mast.name = 'dishMast'
+  mast.position.set(0, topY + h / 2, z)
+  group.add(mast)
+
+  const bowl = new THREE.Mesh(
+    new THREE.SphereGeometry(hull.beam * 0.06 * s + 0.2, 14, 8, 0, PI2, 0, Math.PI * 0.45),
+    glowMat
+  )
+  bowl.name = 'dishBowl'
+  bowl.position.set(0, topY + h, z)
+  group.add(bowl)
+
+  const arm = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.03, 0.03, hull.beam * 0.05 * s + 0.2, 4),
+    mat
+  )
+  arm.name = 'dishArm'
+  arm.position.set(0, topY + h + (hull.beam * 0.05 * s + 0.2) / 2, z)
+  group.add(arm)
+
+  const feed = new THREE.Mesh(new THREE.SphereGeometry(0.06, 8, 6), glowMat)
+  feed.name = 'dishFeed'
+  feed.position.set(0, topY + h + hull.beam * 0.05 * s + 0.2, z)
+  group.add(feed)
+
+  return group
+}
+
+// Array: a mast (mat) with a stack of three glowing sensor plates (glow) and
+// mat cross-bars between them.
+function buildCommandSpikeArray(b) {
+  const { mat, glowMat, hull, s, h, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'commandSpike:array'
+
+  const mast = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.1, 0.18, h, 6),
+    mat
+  )
+  mast.name = 'arrayMast'
+  mast.position.set(0, topY + h / 2, z)
+  group.add(mast)
+
+  const plateW = hull.beam * 0.05 * s + 0.4
+  const plateH = hull.beam * 0.04 * s + 0.25
+  const plateGeo = new THREE.BoxGeometry(plateW, plateH, plateH * 0.6)
+  for (let k = 0; k < 3; k++) {
+    const py = topY + h * (0.55 + 0.2 * k)
+    const plate = new THREE.Mesh(plateGeo, glowMat)
+    plate.name = 'arrayPlate'
+    plate.position.set(0, py, z)
+    group.add(plate)
+    if (k < 2) {
+      const bar = new THREE.Mesh(new THREE.BoxGeometry(plateW * 0.55, 0.06, 0.06), mat)
+      bar.name = 'arrayBar'
+      bar.position.set(0, topY + h * (0.65 + 0.2 * k), z)
+      group.add(bar)
+    }
+  }
+
+  return group
+}
+
+// Nacelle trailing-end (aft cap) builder. `tail` selects the form (see
+// NACELLE_TAIL_OPTIONS); the cap is +Z-aligned and centred on the pod's aft face
+// at (x, y, z). `r` is the pod radius, `len` its length (used to scale the cap).
+// The cap finishes the pod's aft end in a distinct form so a ship's nacelles read
+// as a varied set. All caps are added to `group` (the nacelle's group).
+function buildNacelleTail(group, tail, x, y, z, r, len, mat, glowMat) {
+  switch (tail) {
+    case 'point': {
+      // A tapered cone to a sharp point, narrowing aft to a needle-like exhaust tip.
+      const cone = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r * 0.04, len * 0.22, 14), mat)
+      cone.name = 'nacelleTailPoint'
+      cone.rotation.x = Math.PI / 2 // local +Y -> world +Z; the narrow end (radius 0.04) faces aft (-Z)
+      cone.position.set(x, y, z - len * 0.11)
+      group.add(cone)
+      // A small glowing tip at the point.
+      const tip = new THREE.Mesh(new THREE.SphereGeometry(r * 0.06, 8, 6), glowMat)
+      tip.name = 'nacelleTailPointTip'
+      tip.position.set(x, y, z - len * 0.22)
+      group.add(tip)
+      break
+    }
+    case 'scallop': {
+      // A recessed, scalloped cut-out: a matte ring framing a glowing concave dish
+      // set inboard, so the aft end reads as a scalloped exhaust port. The ring
+      // sits in the Y-Z plane (normal along X) so it frames the aft face; the
+      // torus's default plane is X-Y (normal +Z), so rotate it into Y-Z via
+      // rotation.y = PI/2. Wait — that puts the normal along X. For the ring to
+      // frame the aft face (normal along Z, ring in Y-Z... no). The aft face is
+      // the X-Y plane at a given Z. The ring should be in the X-Y plane (normal
+      // along Z) to frame that face. TorusGeometry default is X-Y plane (normal
+      // +Z), so NO rotation is needed — the ring already frames the X-Y face.
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(r * 0.8, r * 0.14, 8, 18), mat)
+      ring.name = 'nacelleTailScallopRing'
+      // No rotation: the torus is in the X-Y plane (normal along Z), framing the
+      // aft face (which is the X-Y plane at z).
+      ring.position.set(x, y, z)
+      group.add(ring)
+      // The concave dish: a sphere cap, CONCAVE toward -Z (open rim faces aft),
+      // glowing. The cap's pole is at +Y; rotation.x = PI/2 maps +Y -> +Z, so the
+      // dome bulges fore (+Z) and the open rim faces aft (-Z) — a concave dish.
+      const dish = new THREE.Mesh(
+        new THREE.SphereGeometry(r * 0.78, 14, 8, 0, PI2, 0, Math.PI * 0.4),
+        glowMat
+      )
+      dish.name = 'nacelleTailScallopDish'
+      dish.rotation.x = Math.PI / 2
+      dish.position.set(x, y, z + r * 0.12) // recessed fore of the rim, so the dish is concave aft
+      group.add(dish)
+      // Scallops: a ring of small glowing bumps around the rim's inner edge, so the
+      // cut-out reads as scalloped rather than a plain circle.
+      const nScallop = 8
+      for (let k = 0; k < nScallop; k++) {
+        const a = (k / nScallop) * PI2
+        const bump = new THREE.Mesh(new THREE.SphereGeometry(r * 0.1, 6, 5), glowMat)
+        bump.name = 'nacelleTailScallopBump'
+        bump.position.set(x, y + Math.cos(a) * r * 0.62, z + Math.sin(a) * r * 0.62)
+        group.add(bump)
+      }
+      break
+    }
+    case 'flared': {
+      // A flared bell/cone that widens aft (a nozzle-like exhaust): the pod tapers
+      // into a cone that flares out to a wider rim at the very aft end, with a
+      // glowing inner disc.
+      const flare = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r * 1.25, len * 0.18, 14, 1, true), mat)
+      flare.name = 'nacelleTailFlare'
+      flare.rotation.x = Math.PI / 2 // local +Y -> world +Z; the wider end (radius 1.25) faces aft
+      flare.position.set(x, y, z - len * 0.09)
+      group.add(flare)
+      // A glowing inner disc at the flare's aft opening (the exhaust). The disc
+      // faces aft (-Z): CircleGeometry's normal is +Z local, so rotation.y = PI
+      // flips it to -Z (aft).
+      const disc = new THREE.Mesh(new THREE.CircleGeometry(r * 1.18, 18), glowMat)
+      disc.name = 'nacelleTailFlareDisc'
+      disc.rotation.y = Math.PI // normal toward -Z (aft)
+      disc.position.set(x, y, z - len * 0.18)
+      group.add(disc)
+      break
+    }
+    case 'vented': {
+      // A flat matte cap with a glowing central port + a ring of small glowing
+      // vents around it, so the aft end reads as a vented exhaust plate.
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.95, r * 0.95, r * 0.12, 14), mat)
+      cap.name = 'nacelleTailVentedCap'
+      cap.rotation.x = Math.PI / 2
+      cap.position.set(x, y, z)
+      group.add(cap)
+      // A glowing central port. The port faces aft (-Z): CircleGeometry's normal
+      // is +Z local, so rotation.y = PI flips it to -Z (aft).
+      const port = new THREE.Mesh(new THREE.CircleGeometry(r * 0.4, 16), glowMat)
+      port.name = 'nacelleTailVentedPort'
+      port.rotation.y = Math.PI // normal toward -Z (aft)
+      port.position.set(x, y, z - r * 0.07)
+      group.add(port)
+      // A ring of small glowing vents around the port, each facing aft (-Z).
+      // The vents are distributed in the X-Y plane (the aft face plane), so
+      // they spread radially around the central port in the plane of the cap.
+      const nVent = 6
+      for (let k = 0; k < nVent; k++) {
+        const a = (k / nVent) * PI2
+        const vent = new THREE.Mesh(new THREE.CircleGeometry(r * 0.12, 8), glowMat)
+        vent.name = 'nacelleTailVentedVent'
+        vent.rotation.y = Math.PI // normal toward -Z (aft)
+        vent.position.set(x + Math.cos(a) * r * 0.68, y + Math.sin(a) * r * 0.68, z - r * 0.07)
+        group.add(vent)
+      }
+      break
+    }
+    case 'dome':
+    default: {
+      // A glowing hemisphere at the aft end (mirrors the fore dome), a bright
+      // exhaust cap.
+      const dome = new THREE.Mesh(
+        new THREE.SphereGeometry(r * 0.92, 14, 10, 0, PI2, 0, Math.PI * 0.5),
+        glowMat
+      )
+      dome.name = 'nacelleTailDome'
+      dome.rotation.x = -Math.PI / 2 // local +Y -> world -Z, so the dome faces aft
+      dome.position.set(x, y, z)
+      group.add(dome)
+      break
+    }
+  }
+}
+
+// Nacelles: the ship's propulsion pods. One mount configuration per ship
+// (NACELLE_MOUNTS) + one pod body type (NACELLE_TYPES). Each instance is one
+// pod; the side is derived from the instance index (even = port, odd =
+// starboard). The three mounts:
+//   pylon -> long pods on swept struts off the flank (the original look).
+//   aft   -> short stubby pods at the stern, no nose components (old engine
+//            mounting logic), seated against the aft surface.
+//   waist -> pods mounted directly on the hull's waist (midship flank), no strut.
+function buildNacelle(rng, ctx) {
+  const { mat, glowMat, hull, fore, aft, surface, glowColor } = ctx
+  const cfg = ctx.params.nacelles
+  const t = ctx.t
+  const i = ctx.i
+  const s = cfg.size ?? 1
+  const mount = NACELLE_MOUNTS.includes(cfg.mount) ? cfg.mount : 'pylon'
+  const type = NACELLE_TYPES.includes(cfg.type) ? cfg.type : 'standard'
+  const n = cfg.count || 2
+  // Waist mounts a single pair: the half-group holds one pod at +X, mirrored to
+  // the -X twin. Force side=+1 so the lone half-group pod always sits at +X.
+  const side = mount === 'waist' ? 1 : i % 2 === 0 ? -1 : 1
+
+  // Per-pair sub-RNG: keyed on (shipSeed + instance index) so each pair (mirror
+  // twins share the same i) gets consistent per-pair variation, while different
+  // instances can differ. Keeps the mirror symmetric (same i → same values).
+  const pairRng = createRng((ctx.params._seed ?? 0) + i * 7919)
+
+  // --- Placement (z, side offset, pod dimensions) depends on the mount --------
+  let r, len, z, sideExtent, cy, hasStrut, hasNose
+  let aftRingOverride = false
+
+  if (mount === 'pylon') {
+    // Long, thin pod on a swept strut. Spread [0.2, 0.7] (midship-biased).
+    r = Math.min(hull.beam, hull.height) * 0.16 * s
+    const baseLen = hull.length * 0.32 * s
+    const zSpread = (0.7 - 0.2) * hull.length
+    const maxLenBySpacing = n > 1 ? (zSpread / (n - 1)) * 0.82 : baseLen
+    len = Math.min(baseLen, maxLenBySpacing)
+    z = lerp(-hull.length * 0.5, fore.z, t)
+    const hullSideExtent = surface.maxSideAt(z)
+    const lift = NACELLE_LIFT_OPTIONS.includes(cfg.lift) ? cfg.lift : 0
+    cy = hull.height * 0.5 * lift
+    hasStrut = true
+    hasNose = true
+    // The pod sits ON its pylon, outboard of the hull surface by `reach` so the
+    // strut has a clear length and the pod reads as a distinct element (the
+    // strut's hub sits on the pod). The reach also clears the hull's fore-end
+    // taper (the pod's fore end sits where the hull is smaller).
+    const reach = Math.max(
+      r * 2.0,
+      hullSideExtent - surface.maxSideAt(z + len * 0.5) + r * 1.15
+    )
+    sideExtent = hullSideExtent + reach
+  } else if (mount === 'aft') {
+    // Short stubby pod at the stern, no nose. The pods sit in a RING around the
+    // stern and are EMBEDDED in the hull: the front face is buried inside the
+    // stern, the back face protrudes outward. They read as part of the hull
+    // (like engine housings carved into the stern), not as pods bolted on
+    // outboard. The ring is placed at the stern tip; each pod's radial
+    // position is on the hull surface in its slot angle's direction (the
+    // cross-section is anisotropic, so the surface radius varies with angle).
+    // The pod center is shifted aft so the back face protrudes and the front
+    // face is inside the hull.
+    const sternZ = surface.surfaceAt('aft', aft.z)
+    const sternGirth = surface.girthAt(sternZ)
+    const requestedRadius = Math.min(hull.beam, hull.height) * 0.2 * s
+    const perSide = Math.max(1, ctx.n ?? n)
+    r = aftPodRadius(sternGirth, perSide, requestedRadius)
+    len = hull.length * 0.15 * s
+    // The aft pods wrap the FULL stern ring. `n` instances are built in the
+    // half-group across the RIGHT half-ring (angle -PI/2 .. PI/2 in the X-Y
+    // plane, i.e. from bottom through +X/starboard to top). The mirror (flip X)
+    // then fills the LEFT half-ring (PI/2 .. 3PI/2), so the full ring has `2n`
+    // evenly-spaced pods. Slot `i` of `n` is centred in its cell so no pod sits
+    // on the centreline (angle 0/PI) and adjacent pods don't overlap.
+    // Spread the slots across the ACTUAL built per-side count (ctx.n), not the
+    // raw config count, so the pods are evenly spaced regardless of the cap.
+    const half = Math.max(1, ctx.n ?? n)
+    const slot = i
+    const angle = -Math.PI / 2 + ((slot + 0.5) / half) * Math.PI
+    // Place the ring at the stern. For hulls with a flat stern (lofted, wedge,
+    // blocky) the stern tip has a real cross-section, so the radial position is
+    // evaluated at sternZ. For hulls with a rounded stern tip (insect, saucer
+    // dome) the very tip has near-zero cross-section; `bestGirthZ` finds the
+    // nearest Z (within a window) where the hull has its fullest real
+    // cross-section (a station ring), and the radial position is evaluated
+    // there. The pod center is shifted aft so the back face protrudes and the
+    // front face is buried inside.
+    const ringZ = surface.bestGirthZ(sternZ)
+    // The protrusion must be large enough that the back face extends past the
+    // stern. The distance from ringZ to the stern is (sternZ - ringZ) (negative,
+    // since the stern is aft). The back face is at (z - len/2) = (ringZ -
+    // protrude*0.5 - len/2). For this to be < sternZ:
+    //   ringZ - protrude*0.5 - len/2 < sternZ
+    //   protrude > 2 * (ringZ - sternZ - len/2)
+    // Use a protrude that guarantees the back face clears the stern with a
+    // small margin.
+    const minProtrude = 2 * (ringZ - sternZ - len * 0.5) + len * 0.1
+    const protrude = Math.max(len * 0.4, minProtrude)
+    z = ringZ - protrude * 0.5
+    // Radial position around the stern ring (X-Y plane). Each pod sits on the
+    // hull SURFACE in its slot angle's direction at ringZ (where the hull has
+    // a real cross-section). The pod is then shifted aft; the radial position
+    // stays fixed so the pod center is on the hull surface, with the back face
+    // protruding and the front face buried inside.
+    const surfaceR = surface.surfaceRadiusAt(angle, ringZ)
+    const radial = surfaceR
+    cy = Math.sin(angle) * radial
+    sideExtent = Math.cos(angle) * radial
+    hasStrut = false
+    // Standard aft pods get a rounded dome nose cap (the front face is buried
+    // in the stern, so the dome reads as a smooth rounded engine housing).
+    // Crystal aft pods keep their built-in pointed cap (the crystal builder
+    // always adds its own nose cap, so hasNose is ignored for crystals).
+    hasNose = type === 'standard'
+    // Override the side sign: the aft ring uses the angle's cos for X, not the
+    // port/stbd `side`. Force side=1 so podCenter.x = +sideExtent (the angle's
+    // own sign is already in sideExtent).
+    aftRingOverride = true
+  } else {
+    // Waist: a single pair of pods mounted directly on the midship flank, no
+    // strut. Only one pair (generateModules caps the count at 1, mirrored to 2
+    // world pods) and the pod is LONGER than the pylon length, so the single
+    // pair reads as a long engine block rather than a short pod.
+    r = Math.min(hull.beam, hull.height) * 0.18 * s
+    len = hull.length * 0.42 * s
+    // Waist = midship: place around the centre (t maps across the midship band).
+    z = lerp(-hull.length * 0.25, hull.length * 0.1, t)
+    // Use the windowed max side extent (not the single-bin value) so the pod
+    // sits on the hull's actual flank — a single bin can under-read on smooth/
+    // domed archetypes (e.g. saucer) where vertex distribution is uneven.
+    sideExtent = surface.maxSideAt(z)
+    cy = 0
+    hasStrut = false
+    hasNose = true
+  }
+
+  const group = new THREE.Group()
+  group.name = 'nacelle'
+
+  // --- Pod body + caps + tail -------------------------------------------------
+  // The aft ring uses the angle's own sign for X (no port/stbd flip); other
+  // mounts use `side` to place the pod on the port/stbd flank.
+  const podCenterX = aftRingOverride ? sideExtent : side * sideExtent
+  const podCenter = new THREE.Vector3(podCenterX, cy, z)
+  // Aft pods (embedded in the stern) use the non-luminous mat for the dome
+  // cap; other mounts alternate mat/glow per instance.
+  buildNacellePod(group, type, podCenter, r, len, hasNose, mat, glowMat, glowColor, i, mount === 'aft')
+
+  // The pod's AFT end cap (distinct exhaust form per ship). Crystal pods have
+  // their own pointed stern cap (built in buildNacellePod), so no tail decoration.
+  if (type !== 'crystal') {
+    const tail = NACELLE_TAIL_OPTIONS.includes(cfg.tail) ? cfg.tail : 'dome'
+    const aftZ = z - len * 0.5
+    buildNacelleTail(group, tail, podCenter.x, podCenter.y, aftZ, r, len, mat, glowMat)
+  }
+
+  // --- Mount hardware (strut + flange + hub) for the pylon mount --------------
+  if (hasStrut) {
+    buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat, pairRng)
+  }
+
+  return group
+}
+
+// Build the nacelle pod body (+ fore nose if hasNose) at podCenter, aligned
+// along +Z. `type` selects the body geometry: 'standard' (tapered cylinder +
+// domed nose) or 'crystal' (faceted hexagonal prism + pointed caps).
+function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glowColor, i, forceMat = false) {
+  if (type === 'crystal') {
+    // Faceted hexagonal prism (crystal glass) with pointed caps at both ends.
+    const crystalGlass = crystalGlassMaterial(glowColor)
+    const prismR = r * 0.85
+    const prismLen = len * 0.7
+    const prism = new THREE.Mesh(new THREE.CylinderGeometry(prismR, prismR, prismLen, 6), crystalGlass)
+    prism.name = 'nacelleCrystalPrism'
+    prism.rotation.x = Math.PI / 2 // axis -> +Z
+    prism.position.copy(center)
+    group.add(prism)
+    // Pointed caps (same radius/segments as the prism, base flush with the
+    // prism end — reads as a facet carved off the crystal).
+    const capLen = len * 0.25
+    const prismEnd = prismLen / 2
+    const noseCap = new THREE.Mesh(new THREE.ConeGeometry(prismR, capLen, 6), crystalGlass)
+    noseCap.name = 'nacelleCrystalNose'
+    noseCap.rotation.x = Math.PI / 2
+    noseCap.position.set(center.x, center.y, center.z + prismEnd + capLen / 2)
+    group.add(noseCap)
+    const sternCap = new THREE.Mesh(new THREE.ConeGeometry(prismR, capLen, 6), crystalGlass)
+    sternCap.name = 'nacelleCrystalStern'
+    sternCap.rotation.x = -Math.PI / 2
+    sternCap.position.set(center.x, center.y, center.z - prismEnd - capLen / 2)
+    group.add(sternCap)
+    // Luminous thread down the centre of the crystal prism (the ship's glow
+    // colour). A thin cylinder running the full prism length, slightly
+    // protruding into the caps so it reads as the crystal's inner core.
+    const threadR = prismR * 0.06
+    const thread = new THREE.Mesh(
+      new THREE.CylinderGeometry(threadR, threadR, prismLen + capLen, 8),
+      glowMat
+    )
+    thread.name = 'nacelleCrystalThread'
+    thread.rotation.x = Math.PI / 2 // axis -> +Z
+    thread.position.copy(center)
+    group.add(thread)
+    return
+  }
+
+  // Standard: long tapered cylinder + domed fore nose (if hasNose).
+  const pod = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r, len, 14), mat)
+  pod.name = 'nacellePod'
+  pod.rotation.x = Math.PI / 2
+  pod.position.copy(center)
+  group.add(pod)
+
+  if (hasNose) {
+    // Domed forward cap at the pod's fore end (+Z). Alternates mat/glow per
+    // instance so a ship's nacelles read as a varied set. Aft pods (embedded
+    // in the stern) always use the non-luminous mat for the dome.
+    const domeMat = forceMat ? mat : (i % 2 === 0 ? mat : glowMat)
+    const dome = new THREE.Mesh(
+      new THREE.SphereGeometry(r * 0.92, 14, 10, 0, PI2, 0, Math.PI * 0.5),
+      domeMat
+    )
+    dome.name = 'nacelleDome'
+    dome.rotation.x = Math.PI / 2
+    dome.position.set(center.x, center.y, center.z + len * 0.5)
+    group.add(dome)
+  }
+}
+
+// Build the nacelle's swept support strut (pylon mount): a strut from the hull
+// flank root to the pod, with a flange normal to the hull + a hub at the pod.
+function buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat, pairRng) {
+  // Strut sweep along +Z (per-pair): the hull root is offset fore/aft of the
+  // pod so the strut slants. Per-pair so each z-pair sweeps independently.
+  const sweep = pairRng.pick(NACELLE_STRUT_STYLES)
+  const sweepZ = (sweep === 'forward' ? -1 : sweep === 'aft' ? 1 : 0) * len * 0.55
+  const rootZ = z + sweepZ
+  // Root sits on the flank at the ROOT's z (sampled at rootZ) so the flange
+  // stays on the hull surface even when the sweep shifts the root fore/aft of
+  // the pod (where the tapered hull may have retreated).
+  const rootSideExtent = surface.maxSideAt(rootZ)
+  // The pod is already outboard of the hull by `reach` (buildNacelle places the
+  // pod at hullSideExtent + reach). The strut runs from the hull flank root
+  // (on the hull surface, swept fore/aft per-pair) to the POD centre (at
+  // `sideExtent`, fixed), so the hub always sits on the pod and the strut
+  // visibly connects hull -> pod. The per-pair sweep slants the strut by moving
+  // the root fore/aft of the pod, not by tilting the attach off the pod.
+  const root = new THREE.Vector3(side * rootSideExtent, 0, rootZ)
+  const attach = new THREE.Vector3(side * sideExtent, cy, z)
+
+  const dir = new THREE.Vector3().subVectors(attach, root)
+  const d = dir.length() || 1
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir.normalize())
+  const strut = new THREE.Mesh(new THREE.BoxGeometry(r * 0.8, r * 0.32, d), mat)
+  strut.name = 'nacelleStrut'
+  strut.position.copy(root).add(attach).multiplyScalar(0.5)
+  strut.quaternion.copy(q)
+  group.add(strut)
+
+  // Flange normal to the hull side (outboard X) at the root.
+  const flangeNormal = new THREE.Vector3(side, 0, 0)
+  const flangeQ = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), flangeNormal)
+  const flange = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.55, r * 0.7, r * 0.22, 12), mat)
+  flange.name = 'nacelleFlange'
+  flange.position.copy(root)
+  flange.quaternion.copy(flangeQ)
+  group.add(flange)
+
+  const hub = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.4, r * 0.4, r * 0.16, 12), mat)
+  hub.name = 'nacelleHub'
+  hub.position.copy(attach)
+  hub.quaternion.copy(q)
+  group.add(hub)
+}
+
+// Weapons: turret/cannon/railgun hardpoints on the upper girdle ring. The
+// MOUNT stays on the hull surface (placed around the ring by `angle`); the
+// BARREL always points along the axis of travel (+Z, the ship's forward), NOT
+// outward-and-diagonal. `count` is spread around the ring; each instance is one
+// weapon.
+//
+// A family of three silhouettes, each a multi-part group (hull `mat` + an
+// optional glowing accent). The barrel is a cylinder whose axis is rotated to
+// +Z via `rotation.x = PI/2` (local +Y -> world +Z, so its forward direction is
+// exactly (0,0,1)); the barrel's centre is placed at the mount + a +Z offset so
+// it extends forward from the mount.
+//
+// Not instanced (was): the multi-part, multi-style, multi-material families do
+// not batch into InstancedMesh the way the old single mount + barrel did, and
+// the +Z-alignment correctness + per-style distinctness matter more than the
+// draw-call win (see MODULE_SPECS).
+function buildWeapon(rng, ctx) {
+  const { mat, hull, fore, surface, glowColor } = ctx
+  const cfg = ctx.params.weapons
+  const style = WEAPON_STYLES.includes(cfg.style) ? cfg.style : 'turret'
+  const position = WEAPON_POSITIONS.includes(cfg.position) ? cfg.position : 'top'
+  const glowMat = weaponGlowMat(style, glowColor)
+  const n = cfg.count || 3
+  const s = cfg.size ?? 1
+  const i = ctx.i
+  const t = ctx.t
+  // `nose` mounts at the very tip of the hull (a fixed fore position) rather than
+  // spreading fore/aft with `t` — the nose is a single point, not a line.
+  const z = position === 'nose' ? fore.z * 0.94 : lerp(0, fore.z, t * 0.8)
+  const R = Math.min(hull.beam, hull.height) * 0.6 * s
+  const len = Math.min(hull.beam, hull.height) * 0.55 * s
+
+  let mountX
+  let mountY
+  let barrelY
+  if (position === 'nose') {
+    // Nose: mounted right at the hull tip. A single centreline instance (its own
+    // mirror) for count 1; port/stbd pairs flanking the nose for count > 1.
+    const side = n > 1 ? (i % 2 === 0 ? -1 : 1) : 0
+    const sideExt = surface.surfaceAt('side', z)
+    const topExt = surface.surfaceAt('top', z)
+    mountX = side * Math.min(R * 0.7, sideExt * 0.45)
+    mountY = topExt * 0.55
+    barrelY = mountY + R * 0.3
+  } else if (position === 'chin') {
+    // Chin / forward-bottom: mounted under the nose, on the hull's lower-forward
+    // surface. `top` is a single instance (its own mirror); `side` pairs port/stbd.
+    const side = n > 1 ? (i % 2 === 0 ? -1 : 1) : 0
+    const sideExt = surface.surfaceAt('side', z)
+    const bottomExt = surface.surfaceAt('bottom', z)
+    mountX = side * Math.min(R * 0.8, sideExt * 0.4)
+    mountY = bottomExt * 0.55
+    barrelY = mountY + R * 0.2
+  } else if (position === 'belly') {
+    // Belly / ventral: a line of weapons down the keel (bottom surface), spread
+    // fore/aft along the lower hull.
+    const bottomExt = surface.surfaceAt('bottom', z)
+    mountX = 0
+    mountY = bottomExt * 0.6
+    barrelY = mountY + R * 0.2
+  } else {
+    // Top (default): the classic upper girdle ring, spread around the deck.
+    // FIT GUARD: the ring radius is clamped to the hull's actual girth so the
+    // mount sits on (or is embedded into) the hull rather than floating outside
+    // the envelope.
+    const sideExt = surface.surfaceAt('side', z)
+    const topExt = surface.surfaceAt('top', z)
+    const girth = Math.max(1, Math.min(sideExt, topExt))
+    const angle = (i / n) * PI2
+    mountX = Math.cos(angle) * Math.min(R, sideExt)
+    mountY = topExt * 0.45 + Math.sin(angle) * Math.min(R * 0.6, girth * 0.6)
+    barrelY = mountY + R * 0.45
+  }
+
+  const base = { mat, glowMat, R, len, mountX, mountY, z, barrelX: mountX, barrelY }
+  switch (style) {
+    // Turret / gunhouse family (distinct housings, mat + a +Z barrel).
+    case 'twinTurret':
+      return buildWeaponTwinTurret(base)
+    case 'boxy':
+      return buildWeaponBoxy(base)
+    case 'dome':
+      return buildWeaponDome(base)
+    case 'angular':
+      return buildWeaponAngular(base)
+    // Cannon family (thinner barrels, some with emissive tips).
+    case 'longCannon':
+      return buildWeaponLongCannon(base)
+    case 'muzzleBrake':
+      return buildWeaponMuzzleBrake(base)
+    case 'suppressor':
+      return buildWeaponSuppressor(base)
+    case 'dish':
+      return buildWeaponDish(base)
+    case 'tipGlow':
+      return buildWeaponTipGlow(base)
+    case 'cannon':
+      return buildWeaponCannon(base)
+    case 'railgun':
+      return buildWeaponRailgun(base)
+    case 'turret':
+    default:
+      return buildWeaponTurret(base)
+  }
+}
+
+// --- weapon barrel helper ----------------------------------------------------
+// A +Z-aligned barrel: a cylinder whose axis is rotated to +Z (local +Y -> world
+// +Z via rotation.x = PI/2) so its forward direction is exactly (0,0,1) — the
+// direction of travel. `r` is the barrel radius, `len` its length; it is centred
+// at (x, y, z + len*0.5) so its base sits at the mount and it extends forward.
+function addBarrel(group, mat, x, y, z, r, len, name = 'weaponBarrel') {
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.82, r, len, 12), mat)
+  barrel.name = name
+  barrel.rotation.x = Math.PI / 2
+  barrel.position.set(x, y, z + len * 0.5)
+  group.add(barrel)
+  return barrel
+}
+
+// Turret (default): a low, rounded mat turret dome on a mount ring + a thin
+// mat +Z-aligned barrel. No glow accent (the classic single-turret look).
+function buildWeaponTurret(b) {
+  const { mat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:turret'
+
+  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.42, R * 0.5, R * 0.28, 10), mat)
+  mount.name = 'weaponMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  const dome = new THREE.Mesh(
+    new THREE.SphereGeometry(R * 0.34, 14, 8, 0, PI2, 0, Math.PI * 0.55),
+    mat,
+  )
+  dome.name = 'weaponTurretDome'
+  dome.position.set(mountX, mountY + R * 0.12, z)
+  group.add(dome)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, R * 0.1, len * 0.9)
+  return group
+}
+
+// Twin turret: a mat gunhouse with TWO thin barrels side by side, both +Z.
+function buildWeaponTwinTurret(b) {
+  const { mat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:twinTurret'
+
+  const house = new THREE.Mesh(new THREE.BoxGeometry(R * 0.7, R * 0.42, R * 0.6), mat)
+  house.name = 'weaponTwinHouse'
+  house.position.set(mountX, mountY, z)
+  group.add(house)
+
+  // Two barrels offset in X, both pointing +Z.
+  const off = R * 0.16
+  addBarrel(group, mat, barrelX - off, barrelY, z + R * 0.25, R * 0.08, len, 'weaponTwinBarrelL')
+  addBarrel(group, mat, barrelX + off, barrelY, z + R * 0.25, R * 0.08, len, 'weaponTwinBarrelR')
+  return group
+}
+
+// Boxy gunhouse: an angular, blocky mat gunhouse with a single +Z barrel.
+function buildWeaponBoxy(b) {
+  const { mat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:boxy'
+
+  const house = new THREE.Mesh(new THREE.BoxGeometry(R * 0.62, R * 0.5, R * 0.7), mat)
+  house.name = 'weaponBoxyHouse'
+  house.position.set(mountX, mountY + R * 0.05, z)
+  group.add(house)
+
+  // A small forward cheek guard (mat) framing the barrel.
+  const cheek = new THREE.Mesh(new THREE.BoxGeometry(R * 0.4, R * 0.16, R * 0.5), mat)
+  cheek.name = 'weaponBoxyCheek'
+  cheek.position.set(mountX, mountY + R * 0.3, z + R * 0.25)
+  group.add(cheek)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.3, R * 0.1, len)
+  return group
+}
+
+// Dome gunhouse: a rounded, faceted (icosahedron) mat dome with a +Z barrel.
+function buildWeaponDome(b) {
+  const { mat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:dome'
+
+  const dome = new THREE.Mesh(new THREE.IcosahedronGeometry(R * 0.4, 0), mat)
+  dome.name = 'weaponDomeHouse'
+  dome.scale.set(1, 0.72, 1.1)
+  dome.position.set(mountX, mountY + R * 0.1, z)
+  group.add(dome)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.3, R * 0.1, len * 0.95)
+  return group
+}
+
+// Angular gunhouse: a faceted, wedge-shaped mat housing (a chamfered block) with
+// a +Z barrel.
+function buildWeaponAngular(b) {
+  const { mat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:angular'
+
+  // A wedge (triangular prism) sloping up toward the back, bevelled.
+  const wedge = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.4, R * 0.5, R * 0.7, 3, 1), mat)
+  wedge.name = 'weaponAngularHouse'
+  wedge.rotation.z = Math.PI / 2
+  wedge.rotation.y = Math.PI / 2
+  wedge.position.set(mountX, mountY + R * 0.08, z)
+  group.add(wedge)
+
+  // A flat deck plate (mat) the barrel rises from.
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(R * 0.4, R * 0.1, R * 0.5), mat)
+  deck.name = 'weaponAngularDeck'
+  deck.position.set(mountX, mountY + R * 0.26, z)
+  group.add(deck)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.3, R * 0.1, len)
+  return group
+}
+
+// Cannon: a low mat mount + a THIN mat cannon barrel along +Z, with a glowing
+// muzzle ring (accent) at the +Z muzzle. (Barrel radius thinned from the old
+// fat tube so it reads as a cannon, not a stub.)
+function buildWeaponCannon(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:cannon'
+  const lenC = len * 1.25
+
+  const mount = new THREE.Mesh(new THREE.BoxGeometry(R * 0.5, R * 0.34, R * 0.5), mat)
+  mount.name = 'weaponCannonMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.25, R * 0.085, lenC)
+
+  const muzzle = new THREE.Mesh(new THREE.TorusGeometry(R * 0.11, R * 0.035, 8, 16), glowMat)
+  muzzle.name = 'weaponMuzzle'
+  muzzle.position.set(barrelX, barrelY, z + R * 0.25 + lenC)
+  group.add(muzzle)
+
+  return group
+}
+
+// Long cannon: a long, very thin barrel (the classic "lance" cannon) with a
+// small glowing tip (accent) at the muzzle.
+function buildWeaponLongCannon(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:longCannon'
+  const lenC = len * 1.8
+
+  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.3, R * 0.38, R * 0.3, 8), mat)
+  mount.name = 'weaponLongMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, R * 0.07, lenC, 'weaponLongBarrel')
+
+  // A small glowing tip at the muzzle.
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(R * 0.09, 10, 8), glowMat)
+  tip.name = 'weaponLongTip'
+  tip.position.set(barrelX, barrelY, z + R * 0.2 + lenC)
+  group.add(tip)
+
+  return group
+}
+
+// Muzzle brake: a cannon barrel with a flared, slotted glowing muzzle brake at
+// the +Z tip (accent) — the classic "brake" that vents the shot.
+function buildWeaponMuzzleBrake(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:muzzleBrake'
+  const lenC = len * 1.3
+
+  const mount = new THREE.Mesh(new THREE.BoxGeometry(R * 0.46, R * 0.34, R * 0.5), mat)
+  mount.name = 'weaponBrakeMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.25, R * 0.09, lenC, 'weaponBrakeBarrel')
+
+  // A flared brake housing (mat) at the muzzle.
+  const brake = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.18, R * 0.1, R * 0.28, 10), mat)
+  brake.name = 'weaponBrakeHousing'
+  brake.rotation.x = Math.PI / 2
+  brake.position.set(barrelX, barrelY, z + R * 0.25 + lenC)
+  group.add(brake)
+
+  // Glowing brake slots (accent) — a few small emissive blocks around the muzzle.
+  const slotGeo = new THREE.BoxGeometry(R * 0.05, R * 0.05, R * 0.12)
+  for (let k = 0; k < 4; k++) {
+    const a = (k / 4) * PI2
+    const slot = new THREE.Mesh(slotGeo, glowMat)
+    slot.name = 'weaponBrakeSlot'
+    slot.position.set(barrelX + Math.cos(a) * R * 0.13, barrelY + Math.sin(a) * R * 0.13, z + R * 0.25 + lenC + R * 0.1)
+    group.add(slot)
+  }
+
+  return group
+}
+
+// Suppressor: a cannon barrel with a long, ribbed glowing suppressor tip (accent)
+// at the +Z end — a "silencer" that glows.
+function buildWeaponSuppressor(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:suppressor'
+  const lenC = len * 1.3
+
+  const mount = new THREE.Mesh(new THREE.BoxGeometry(R * 0.46, R * 0.34, R * 0.5), mat)
+  mount.name = 'weaponSupMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.25, R * 0.08, lenC, 'weaponSupBarrel')
+
+  // A glowing suppressor tip (accent): a wider glowing cylinder at the muzzle.
+  const sup = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.12, R * 0.12, R * 0.34, 10), glowMat)
+  sup.name = 'weaponSuppressor'
+  sup.rotation.x = Math.PI / 2
+  sup.position.set(barrelX, barrelY, z + R * 0.25 + lenC)
+  group.add(sup)
+
+  return group
+}
+
+// Dish cannon: a barrel ending in a glowing parabolic energy dish (accent) at the
+// +Z tip — a "laser dish" emitter.
+function buildWeaponDish(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:dish'
+  const lenC = len * 1.15
+
+  const mount = new THREE.Mesh(new THREE.BoxGeometry(R * 0.5, R * 0.4, R * 0.5), mat)
+  mount.name = 'weaponDishMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.25, R * 0.09, lenC, 'weaponDishBarrel')
+
+  // A glowing dish (accent): a shallow sphere cap, CONCAVE toward +Z, so the open
+  // rim faces forward (the direction of travel) and the dome curves back toward
+  // the barrel — a forward-projecting muzzle dish, not a dome bulging at the
+  // enemy. The sphere cap's pole is at +Y; rotation.x = -PI/2 maps +Y -> -Z, so
+  // the cap's dome bulges aft (-Z, toward the barrel) and its open rim faces +Z.
+  const dish = new THREE.Mesh(
+    new THREE.SphereGeometry(R * 0.22, 14, 8, 0, PI2, 0, Math.PI * 0.42),
+    glowMat,
+  )
+  dish.name = 'weaponDish'
+  dish.rotation.x = -Math.PI / 2 // open rim toward +Z (forward), dome toward barrel
+  dish.position.set(barrelX, barrelY, z + R * 0.25 + lenC)
+  group.add(dish)
+
+  // A small feed node at the dish's focus (glow).
+  const feed = new THREE.Mesh(new THREE.SphereGeometry(R * 0.06, 8, 6), glowMat)
+  feed.name = 'weaponDishFeed'
+  feed.position.set(barrelX, barrelY, z + R * 0.25 + lenC + R * 0.12)
+  group.add(feed)
+
+  return group
+}
+
+// Tip glow: a standard cannon barrel with a bright, emissive energy tip (accent)
+// — a "charged" muzzle.
+function buildWeaponTipGlow(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:tipGlow'
+  const lenC = len * 1.2
+
+  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.32, R * 0.4, R * 0.32, 8), mat)
+  mount.name = 'weaponTipMount'
+  mount.position.set(mountX, mountY, z)
+  group.add(mount)
+
+  addBarrel(group, mat, barrelX, barrelY, z + R * 0.25, R * 0.085, lenC, 'weaponTipBarrel')
+
+  // A bright emissive tip (accent): a glowing cone at the muzzle.
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(R * 0.12, R * 0.24, 10), glowMat)
+  tip.name = 'weaponTip'
+  tip.rotation.x = Math.PI / 2 // point toward +Z
+  tip.position.set(barrelX, barrelY, z + R * 0.25 + lenC + R * 0.08)
+  group.add(tip)
+
+  return group
+}
+
+// Railgun: a sleek low profile (mat) with a long thin +Z rail and a glowing
+// energy channel (accent) running its length.
+function buildWeaponRailgun(b) {
+  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY } = b
+  const group = new THREE.Group()
+  group.name = 'weapon:railgun'
+  const lenR = len * 1.2
+
+  const profile = new THREE.Mesh(new THREE.BoxGeometry(R * 0.5, R * 0.3, R * 0.4), mat)
+  profile.name = 'weaponProfile'
+  profile.position.set(mountX, mountY, z)
+  group.add(profile)
+
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(R * 0.1, R * 0.16, lenR), mat)
+  rail.name = 'weaponRail'
+  rail.position.set(barrelX, barrelY, z + lenR * 0.5)
+  group.add(rail)
+
+  const channel = new THREE.Mesh(new THREE.BoxGeometry(R * 0.05, R * 0.05, lenR * 0.9), glowMat)
+  channel.name = 'weaponChannel'
+  channel.position.set(barrelX, barrelY, z + lenR * 0.5)
+  group.add(channel)
+
+  return group
+}
+
+// Sensor mast: slender mast + sensor head, rising from the top deck. `count`
+// masts are placed at staggered z along the deck. A family of three distinct
+// silhouettes, each multi-part and multi-material (hull `mat` + the sensor-mast
+// violet glow accent):
+//   mast (default): the existing mast + glowing sensor head.
+//   pole:           a thin lattice pole with a glowing sensor pod mid-height.
+//   ring:           a mast topped by a glowing horizontal sensor ring + supports.
+//
+// Not instanced (was): the multi-part, multi-material styles do not batch into
+// InstancedMesh the way the old single-mast + head did, and distinctness matters
+// more than the draw-call win here (see MODULE_SPECS).
+function buildSensorMast(rng, ctx) {
+  const { mat, hull, fore, surface, glowColor } = ctx
+  const cfg = ctx.params.sensorMast
+  const style = SENSOR_MAST_STYLES.includes(cfg.style) ? cfg.style : 'mast'
+  const glowMat = moduleGlowMat('sensorMast', glowColor)
+  const n = cfg.count || 1
+  const i = ctx.i
+  const h = hull.height * 0.9 * (cfg.height / 4)
+  const z = lerp(hull.length * 0.05, fore.z * 0.9, symmetricT(i, n))
+  const x = 0
+  // FIT GUARD: seat the mast base on the real deck height at this z, embedding
+  // by a fraction of its own height (guaranteed contact).
+  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const base = { mat, glowMat, hull, h, x, z, topY: baseY }
+
+  switch (style) {
+    case 'pole':
+      return buildSensorMastPole(base)
+    case 'ring':
+      return buildSensorMastRing(base)
+    case 'mast':
+    default:
+      return buildSensorMastMast(base)
+  }
+}
+
+// Mast (default): the existing slender mast + glowing sensor head.
+function buildSensorMastMast(b) {
+  const { mat, glowMat, h, x, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'sensorMast:mast'
+
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.2, h, 6), mat)
+  mast.name = 'mast'
+  mast.position.set(x, topY + h / 2, z)
+  group.add(mast)
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), glowMat)
+  head.name = 'sensorHead'
+  head.position.set(x, topY + h, z)
+  group.add(head)
+
+  return group
+}
+
+// Pole: a thin lattice pole (mat) with a glowing sensor pod (glow) mid-height.
+function buildSensorMastPole(b) {
+  const { mat, glowMat, h, x, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'sensorMast:pole'
+
+  const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.1, h, 5), mat)
+  pole.name = 'pole'
+  pole.position.set(x, topY + h / 2, z)
+  group.add(pole)
+
+  const pod = new THREE.Mesh(new THREE.OctahedronGeometry(0.35, 0), glowMat)
+  pod.name = 'polePod'
+  pod.scale.set(0.8, 1.3, 0.8)
+  pod.position.set(x, topY + h * 0.55, z)
+  group.add(pod)
+
+  return group
+}
+
+// Ring: a mast (mat) topped by a glowing horizontal sensor ring (glow torus) +
+// two mat supports.
+function buildSensorMastRing(b) {
+  const { mat, glowMat, h, x, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'sensorMast:ring'
+
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.18, h, 6), mat)
+  mast.name = 'ringMast'
+  mast.position.set(x, topY + h / 2, z)
+  group.add(mast)
+
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.5, 0.08, 8, 20), glowMat)
+  ring.name = 'sensorRing'
+  ring.rotation.x = Math.PI / 2
+  ring.position.set(x, topY + h, z)
+  group.add(ring)
+
+  const supportGeo = new THREE.CylinderGeometry(0.05, 0.05, 0.5, 4)
+  for (const sgn of [-1, 1]) {
+    const sup = new THREE.Mesh(supportGeo, mat)
+    sup.name = 'ringSupport'
+    sup.position.set(x + sgn * 0.45, topY + h - 0.2, z)
+    group.add(sup)
+  }
+
+  return group
+}
+
+// Antenna: whip/element cluster mounted on the top deck near the fore. `count`
+// clusters at staggered z. A family of three distinct silhouettes, each
+// multi-part and multi-material (hull `mat` + the antenna magenta glow accent):
+//   whip (default): the existing thin whip + tip (tip now glows).
+//   array:          a small mast with 2-3 short glowing whip elements fanned out.
+//   dish:           a thin mast with a glowing micro-dish at the top.
+//
+// Not instanced (was): the multi-part, multi-material styles do not batch into
+// InstancedMesh the way the old single whip + tip did, and distinctness matters
+// more than the draw-call win here (see MODULE_SPECS).
+function buildAntenna(rng, ctx) {
+  const { mat, hull, fore, surface, glowColor } = ctx
+  const cfg = ctx.params.antenna
+  const style = ANTENNA_STYLES.includes(cfg.style) ? cfg.style : 'whip'
+  const glowMat = moduleGlowMat('antenna', glowColor)
+  const n = cfg.count || 2
+  const i = ctx.i
+  const h = hull.height * 0.7
+  const z = lerp(hull.length * 0.1, fore.z * 0.95, symmetricT(i, n))
+  const x = 0
+  // FIT GUARD: seat the whip base on the real deck height at this z, embedding
+  // by a fraction of its own height (guaranteed contact).
+  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const base = { mat, glowMat, hull, h, x, z, topY: baseY }
+
+  switch (style) {
+    case 'array':
+      return buildAntennaArray(base)
+    case 'dish':
+      return buildAntennaDish(base)
+    case 'whip':
+    default:
+      return buildAntennaWhip(base)
+  }
+}
+
+// Whip (default): the existing thin whip + tip; the tip now glows.
+function buildAntennaWhip(b) {
+  const { mat, glowMat, h, x, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'antenna:whip'
+
+  const whip = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.1, h, 4), mat)
+  whip.name = 'antennaWhip'
+  whip.position.set(x, topY + h / 2, z)
+  group.add(whip)
+
+  const tip = new THREE.Mesh(new THREE.SphereGeometry(0.1, 6, 4), glowMat)
+  tip.name = 'antennaTip'
+  tip.position.set(x, topY + h, z)
+  group.add(tip)
+
+  return group
+}
+
+// Array: a small mast (mat) with three short glowing whip elements (glow)
+// fanned out around the top.
+function buildAntennaArray(b) {
+  const { mat, glowMat, h, x, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'antenna:array'
+
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, h, 5), mat)
+  mast.name = 'arrayMast'
+  mast.position.set(x, topY + h / 2, z)
+  group.add(mast)
+
+  const elH = h * 0.4
+  const elGeo = new THREE.CylinderGeometry(0.03, 0.05, elH, 4)
+  const elR = 0.45
+  for (let k = 0; k < 3; k++) {
+    const a = (k / 3) * PI2
+    const el = new THREE.Mesh(elGeo, glowMat)
+    el.name = 'arrayElement'
+    el.rotation.z = Math.cos(a) * 0.45
+    el.rotation.x = -Math.sin(a) * 0.45
+    el.position.set(x + Math.cos(a) * elR, topY + h * 0.78 + (elH / 2) * 0.4, z + Math.sin(a) * elR)
+    group.add(el)
+  }
+
+  return group
+}
+
+// Dish: a thin mast (mat) with a glowing micro-dish (glow) at the top + a small
+// mat feed node.
+function buildAntennaDish(b) {
+  const { mat, glowMat, h, x, z, topY } = b
+  const group = new THREE.Group()
+  group.name = 'antenna:dish'
+
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.07, h, 5), mat)
+  mast.name = 'dishMast'
+  mast.position.set(x, topY + h / 2, z)
+  group.add(mast)
+
+  const dish = new THREE.Mesh(
+    new THREE.SphereGeometry(0.22, 12, 6, 0, PI2, 0, Math.PI * 0.5),
+    glowMat
+  )
+  dish.name = 'microDish'
+  dish.position.set(x, topY + h, z)
+  group.add(dish)
+
+  const feed = new THREE.Mesh(new THREE.SphereGeometry(0.06, 6, 4), mat)
+  feed.name = 'dishFeed'
+  feed.position.set(x, topY + h + 0.16, z)
+  group.add(feed)
+
+  return group
+}
+
+// Hangar: large bay on the port/starboard side. `count` is 1 or 2 (one per
+// side when 2). A family of three distinct silhouettes, each multi-part and
+// multi-material (hull `mat` + the hangar amber glow accent):
+//   bay (default): the existing boxy bay + inset door.
+//   pod:           a rounded hangar pod with a glowing docking-ring door.
+//   dock:          an open docking gantry with glowing guide-lights at the mouth.
+function buildHangar(rng, ctx) {
+  const { mat, hull, surface, glowColor, fore, t } = ctx
+  const cfg = ctx.params.hangar
+  const style = HANGAR_STYLES.includes(cfg.style) ? cfg.style : 'bay'
+  const position = HANGAR_POSITIONS.includes(cfg.position) ? cfg.position : 'side'
+  const glowMat = moduleGlowMat('hangar', glowColor)
+  const n = cfg.count || 1
+  const i = ctx.i
+  const side = n > 1 ? (i % 2 === 0 ? -1 : 1) : 1
+
+  // Reduced vertical size: the hangar is flatter than before (0.42 vs 0.7 of
+  // hull height) so it reads as a shallow cavity rather than a tall box.
+  const w = hull.beam * 0.42
+  const h = hull.height * 0.42
+  const d = hull.length * 0.18
+
+  let cx, cy, cz, rotY = 0, rotX = 0
+  // Centreline positions (chin, belly, nose) sit on the hull's bottom/fore
+  // centreline. They must NOT be mirrored: the half-group mirror would
+  // duplicate them at the same position with a flipped X, causing overlapping
+  // geometry that can appear to float outside the hull. `isCentreline` flags
+  // these so the caller can skip the mirror.
+  const isCentreline = position === 'chin' || position === 'belly' || position === 'nose'
+  if (position === 'side') {
+    cz = -hull.length * 0.08
+    const sideExt = surface.surfaceAt('side', cz)
+    cx = side * (sideExt + w * 0.1)
+    cy = 0
+  } else if (position === 'nose') {
+    // Mounted on the hull's nose, opening forward (+Z).
+    const noseZ = surface.surfaceAt('fore', 0)
+    cz = noseZ + d * 0.25
+    cx = 0
+    cy = hull.height * 0.1
+  } else if (position === 'chin') {
+    // Under the nose, opening forward-and-down. Placed at the fore anchor's
+    // z, below the hull's bottom surface.
+    const zChin = lerp(-hull.length * 0.1, fore.z, 0.6)
+    const botY = -Math.abs(surface.surfaceAt('bottom', zChin))
+    cz = zChin
+    cx = 0
+    cy = botY - h * 0.3
+    rotX = Math.PI * 0.35
+  } else {
+    // belly: on the hull's bottom, midship, opening downward.
+    cz = lerp(-hull.length * 0.3, hull.length * 0.1, t)
+    const botY = -Math.abs(surface.surfaceAt('bottom', cz))
+    cx = 0
+    cy = botY - h * 0.15
+    rotX = Math.PI * 0.5
+  }
+
+  // For centreline positions, the hangar's "outboard" face should point down
+  // (or forward for nose), not along X. The inner builders use `side` to
+  // orient the outboard face; for centreline hangars we use side=1 (so the
+  // outboard face is +X in local space) and then rotate the whole group so
+  // that +X maps to the desired world direction:
+  //   nose: +X -> +Z (rotY = PI/2)
+  //   chin: +X -> down-and-forward (rotY = PI/2, then rotX = PI*0.35)
+  //   belly: +X -> down (rotY = PI/2, then rotX = PI/2)
+  if (position === 'nose') rotY = Math.PI / 2
+  else if (position === 'chin') rotY = Math.PI / 2
+  else if (position === 'belly') rotY = Math.PI / 2
+
+  // Inner geometry is built at the local origin (cx=0, cy=0, z=0) with the
+  // outboard face along +X. The outer group handles world positioning and
+  // rotation, so the inner builders just need the dimensions + side=1.
+  const base = { mat, glowMat, hull, w, h, d, z: 0, cx: 0, cy: 0, side: 1 }
+
+  const group = new THREE.Group()
+  group.name = 'hangar'
+  let inner
+  switch (style) {
+    case 'pod':
+      inner = buildHangarPod(base)
+      break
+    case 'dock':
+      inner = buildHangarDock(base)
+      break
+    case 'bay':
+    default:
+      inner = buildHangarBay(base)
+      break
+  }
+  group.add(inner)
+  group.position.set(cx, cy, cz)
+  group.rotation.order = 'YXZ'
+  group.rotation.y = rotY
+  group.rotation.x = rotX
+  group.userData.isCentreline = isCentreline
+  return group
+}
+
+// Bay (default): an OPEN hangar bay — a concave void on the hull's side, not a
+// closed box with a door. The outboard face is a recessed opening framed by four
+// matte walls (top, bottom, fore, aft); the BACK of the bay (recessed inboard)
+// is a single emissive panel, so the opening reads as a dark cavity glowing from
+// within. `side` is +1 (starboard) or -1 (port); the opening faces outboard
+// (the +X side for starboard, -X for port).
+function buildHangarBay(b) {
+  const { mat, glowMat, w, h, d, z, cx, cy, side } = b
+  const group = new THREE.Group()
+  group.name = 'hangar:bay'
+
+  // Wall thickness and recess depth: the opening is set in from the outboard
+  // face, so the back wall (emissive) sits recessed, creating the concave void.
+  const t = Math.min(w, h) * 0.12 // wall thickness
+  const recess = w * 0.32 // how deep the cavity is (inboard from the outboard face)
+
+  // The four framing walls (mat). Each is a box spanning the full bay height/depth
+  // minus the opening, positioned to leave a rectangular void on the outboard face.
+  // Top and bottom walls: span the bay's X (outboard) and Z (fore-aft), thin in Y.
+  const topWall = new THREE.Mesh(new THREE.BoxGeometry(w, t, d), mat)
+  topWall.name = 'hangarWallTop'
+  topWall.position.set(cx, cy + h * 0.5 - t * 0.5, z)
+  group.add(topWall)
+  const botWall = new THREE.Mesh(new THREE.BoxGeometry(w, t, d), mat)
+  botWall.name = 'hangarWallBottom'
+  botWall.position.set(cx, cy - h * 0.5 + t * 0.5, z)
+  group.add(botWall)
+  // Fore and aft walls: span the bay's X and Y (between top/bottom walls), thin in Z.
+  const innerH = h - t * 2 // height between the top and bottom walls
+  const foreWall = new THREE.Mesh(new THREE.BoxGeometry(w, innerH, t), mat)
+  foreWall.name = 'hangarWallFore'
+  foreWall.position.set(cx, cy, z + d * 0.5 - t * 0.5)
+  group.add(foreWall)
+  const aftWall = new THREE.Mesh(new THREE.BoxGeometry(w, innerH, t), mat)
+  aftWall.name = 'hangarWallAft'
+  aftWall.position.set(cx, cy, z - d * 0.5 + t * 0.5)
+  group.add(aftWall)
+
+  // The BACK of the bay (emissive): a single panel recessed inboard from the
+  // outboard face, spanning the opening's Y-Z rectangle. This is the glowing
+  // "interior" seen through the open void.
+  const openW = d - t * 2 // opening width along Z (between fore/aft walls)
+  const openH = h - t * 2 // opening height along Y (between top/bottom walls)
+  const back = new THREE.Mesh(new THREE.BoxGeometry(t * 0.5, openH, openW), glowMat)
+  back.name = 'hangarBack'
+  // Recessed inboard: the outboard face is at cx + side*(w/2); the back wall sits
+  // `recess` inboard of that (toward the hull), at the cavity floor. `cx` is
+  // already signed (positive for starboard, negative for port), so the inboard
+  // direction is -side.
+  const backX = cx - side * recess
+  back.position.set(backX, cy, z)
+  group.add(back)
+
+  // A thin emissive rim lining the opening's inner edges (the void's lip), so the
+  // cavity reads as a lit opening rather than a flat hole. Four thin bars framing
+  // the outboard face of the opening.
+  const rimT = t * 0.4
+  const rimOutX = cx + side * (w * 0.5) // outboard face x (cx is already signed)
+  const rimTop = new THREE.Mesh(new THREE.BoxGeometry(rimT, rimT, openW), glowMat)
+  rimTop.name = 'hangarRimTop'
+  rimTop.position.set(rimOutX, cy + h * 0.5 - rimT * 0.5, z)
+  group.add(rimTop)
+  const rimBot = new THREE.Mesh(new THREE.BoxGeometry(rimT, rimT, openW), glowMat)
+  rimBot.name = 'hangarRimBottom'
+  rimBot.position.set(rimOutX, cy - h * 0.5 + rimT * 0.5, z)
+  group.add(rimBot)
+  const rimFore = new THREE.Mesh(new THREE.BoxGeometry(rimT, openH - rimT * 2, rimT), glowMat)
+  rimFore.name = 'hangarRimFore'
+  rimFore.position.set(rimOutX, cy, z + d * 0.5 - rimT * 0.5)
+  group.add(rimFore)
+  const rimAft = new THREE.Mesh(new THREE.BoxGeometry(rimT, openH - rimT * 2, rimT), glowMat)
+  rimAft.name = 'hangarRimAft'
+  rimAft.position.set(rimOutX, cy, z - d * 0.5 + rimT * 0.5)
+  group.add(rimAft)
+
+  return group
+}
+
+// Pod: a rounded hangar pod (mat) with an OPEN circular void on its outboard
+// face — a concave docking port. The interior back of the pod (recessed inboard)
+// is a glowing disc, so the opening reads as a dark cavity lit from within. A
+// glowing ring lines the opening's rim. `side` is +1 (starboard) or -1 (port);
+// the opening faces outboard (the +X side for starboard, -X for port).
+function buildHangarPod(b) {
+  const { mat, glowMat, w, h, d, z, cx, cy, side } = b
+  const group = new THREE.Group()
+  group.name = 'hangar:pod'
+
+  // The pod body: a rounded ellipsoid (mat). The outboard face is where the
+  // opening is; the pod's interior back is recessed inboard.
+  const pod = new THREE.Mesh(new THREE.SphereGeometry(1, 24, 16), mat)
+  pod.name = 'hangarPod'
+  pod.scale.set(w * 0.5, h * 0.5, d * 0.5)
+  pod.position.set(cx, cy, z)
+  group.add(pod)
+
+  // The opening's radius (the circular void on the outboard face).
+  const openR = Math.min(h, d) * 0.32
+  // The recess depth: how far inboard the glowing back sits from the outboard
+  // face, creating the concave void.
+  const recess = w * 0.25
+  // The outboard face x (the pod's outermost point on the side axis).
+  const outX = cx + side * (w * 0.5)
+  // The back of the pod (emissive): a glowing disc recessed inboard, facing the
+  // opening. This is the "interior" seen through the open void.
+  const back = new THREE.Mesh(new THREE.CircleGeometry(openR, 24), glowMat)
+  back.name = 'hangarPodBack'
+  back.position.set(outX - side * recess, cy, z)
+  // Face the back toward the opening (outboard): +X for starboard, -X for port.
+  back.rotation.y = side === 1 ? Math.PI / 2 : -Math.PI / 2
+  group.add(back)
+
+  // A glowing ring lining the opening's rim (the void's lip), so the cavity
+  // reads as a lit port rather than a flat hole.
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(openR, Math.min(h, d) * 0.03, 10, 24), glowMat)
+  ring.name = 'hangarPodRing'
+  ring.position.set(outX, cy, z)
+  // The ring faces outboard (its plane is perpendicular to the side/X axis).
+  ring.rotation.y = Math.PI / 2
+  group.add(ring)
+
+  return group
+}
+
+// Dock: an open docking gantry — mat struts + crossbar framing an open mouth,
+// with glowing guide-lights lining the entrance AND an emissive back panel
+// recessed inboard, so the open gantry reads as a dark cavity glowing from
+// within (not just an empty frame). `side` is +1 (starboard) or -1 (port); the
+// mouth faces outboard.
+function buildHangarDock(b) {
+  const { mat, glowMat, w, h, d, z, cx, cy, side } = b
+  const group = new THREE.Group()
+  group.name = 'hangar:dock'
+
+  const strutW = w * 0.14
+  const strutGeo = new THREE.BoxGeometry(strutW, h, d)
+  const left = new THREE.Mesh(strutGeo, mat)
+  left.name = 'dockStrutLeft'
+  left.position.set(cx - w * 0.38, cy, z)
+  group.add(left)
+  const right = new THREE.Mesh(strutGeo, mat)
+  right.name = 'dockStrutRight'
+  right.position.set(cx + w * 0.38, cy, z)
+  group.add(right)
+
+  const cross = new THREE.Mesh(new THREE.BoxGeometry(w, strutW, strutW), mat)
+  cross.name = 'dockCrossbar'
+  cross.position.set(cx, cy + h * 0.5, z)
+  group.add(cross)
+
+  // The BACK of the gantry (emissive): a panel recessed inboard from the mouth,
+  // spanning the opening between the struts. This is the glowing "interior" seen
+  // through the open gantry.
+  const innerW = w * 0.76 - strutW * 2 // width between the inner faces of the struts
+  const back = new THREE.Mesh(new THREE.BoxGeometry(strutW * 0.4, h - strutW, innerW), glowMat)
+  back.name = 'dockBack'
+  // Recessed inboard: the mouth is at the outboard face; the back sits `recess`
+  // inboard (toward the hull), at the cavity floor.
+  const recess = w * 0.3
+  const backX = cx - side * recess
+  back.position.set(backX, cy, z)
+  group.add(back)
+
+  // Glowing guide-lights along the front mouth (a horizontal run + two verticals).
+  const lightR = h * 0.04
+  const lightGeo = new THREE.SphereGeometry(lightR, 8, 6)
+  const mouthX = w * 0.72
+  const mouthZ = z + d * 0.5 + lightR
+  for (let k = 0; k < 5; k++) {
+    const ly = cy + (k - 2) * (h * 0.18)
+    const light = new THREE.Mesh(lightGeo, glowMat)
+    light.name = 'dockGuideLight'
+    light.position.set(cx, ly, mouthZ)
+    group.add(light)
+  }
+  for (let k = 0; k < 3; k++) {
+    const lx = cx - mouthX / 2 + (k / 2) * mouthX
+    for (const sgn of [-1, 1]) {
+      const light = new THREE.Mesh(lightGeo, glowMat)
+      light.name = 'dockGuideLight'
+      light.position.set(lx, cy + sgn * h * 0.5, mouthZ)
+      group.add(light)
+    }
+  }
+
+  return group
+}
+
+// --- catalog + placement -----------------------------------------------------
+
+// Aft-mount pod fit. The aft pods wrap the FULL stern ring: `n` instances are
+// built on one side (the half-group) and mirrored, giving `2n` pods evenly
+// spaced around the full circumference 2*PI*girth. For `2n` pods of radius r to
+// fit without overlapping, 2*PI*girth >= 2n * 2 * r * margin, i.e.
+// PI*girth >= n * 2 * r * margin. `maxAftPodCount` returns the max total count
+// (2n) that fits at a given radius; `aftPodRadius` returns the clamped radius
+// that fits a given total count. Both are shared by generateModules (cap the
+// count) and buildNacelle (size the pod) so they agree on the fit.
+const AFT_POD_MARGIN = 1.25 // small gap between adjacent pods in the ring
+// `n` pods are built in the half-group and mirrored, giving 2n total around the
+// full ring (2*PI*girth). For 2n pods of radius r to fit without overlapping,
+// (2r/girth) * margin <= PI/n  =>  r <= PI*girth / (2n * margin).
+// `maxAftN` returns the max n (per-side count) that fits at a given radius;
+// `aftPodRadius` returns the clamped radius that fits a given n. Both are shared
+// by generateModules (cap count=n) and buildNacelle (size the pod) so they agree.
+function maxAftN(sternGirth, radius) {
+  const arc = Math.max(1, Math.PI * Math.max(1, sternGirth))
+  const n = Math.floor(arc / (2 * Math.max(0.15, radius) * AFT_POD_MARGIN))
+  return Math.max(1, n)
+}
+function aftPodRadius(sternGirth, n, requestedRadius) {
+  const arc = Math.max(1, Math.PI * Math.max(1, sternGirth))
+  return Math.max(0.15, Math.min(requestedRadius, arc / (2 * Math.max(1, n) * AFT_POD_MARGIN)))
+}
+
+// Per-module spec: builder, minimum density at which the module appears, and
+// how its instance count scales with density (0..maxCount). No module is
+// instanced now: every module type is a family of distinct multi-part,
+// multi-material, multi-style geometries (see the build* builders), which do
+// not batch into InstancedMesh the way the old single-geometry repeats did.
+// Weapons and nacelles in particular are always built as individual groups —
+// correctness + per-style distinctness matter more than the draw-call win here.
+const MODULE_SPECS = [
+  { key: 'bridge', build: buildBridge, min: 0 },
+  // The other multi-style families (bridge / commandSpike / sensorMast /
+  // antenna / hangar) are also always built as individual groups for the same
+  // reason: their styles are distinct multi-part, multi-material geometries.
+  { key: 'commandSpike', build: buildCommandSpike, min: 0.15 },
+  // weapons is not instanced: its three styles are distinct multi-part,
+  // multi-material groups (see buildWeapon*), which do not batch into
+  // InstancedMesh — +Z-alignment correctness + distinctness over the draw-call
+  // win.
+  { key: 'weapons', build: buildWeapon, min: 0.3 },
+  // Nacelles are the ship's propulsion (the unified nacelle/engine system) —
+  // every ship has them, so they're essential (min 0): always present when
+  // enabled, not density-ramped.
+  { key: 'nacelles', build: buildNacelle, min: 0 },
+  { key: 'sensorMast', build: buildSensorMast, min: 0.45 },
+  { key: 'antenna', build: buildAntenna, min: 0.5 },
+  { key: 'hangar', build: buildHangar, min: 0.6 },
+]
+
+function moduleCount(key, p, density, maxCount) {
+  if (!p.enabled) return 0
+  const spec = MODULE_SPECS.find((s) => s.key === key)
+  if (spec && density < spec.min) return 0
+  if (maxCount <= 0) return 0
+  // Essentials (min <= 0) are always present when enabled.
+  if (spec && spec.min <= 0) return Math.max(1, Math.round(maxCount))
+  // Others: ramp 0 -> maxCount as density rises from the module's min to 1.
+  const span = Math.max(1e-6, 1 - spec.min)
+  const frac = clamp((density - spec.min) / span, 0, 1)
+  return Math.round(frac * maxCount)
+}
+
+// Symmetric normalized position (0..1) for instance `i` of `n`: a single
+// instance sits at the midpoint; an even count is placed in mirrored pairs about
+// the centre; an odd count has a centre instance plus mirrored pairs. This is
+// the "strong symmetry" placement helper — no jitter, so mirrored instances land
+// on exactly symmetric positions.
+function symmetricT(i, n) {
+  if (n <= 1) return 0.5
+  const half = (n + 1) / 2 // number of positions on one side incl. centre
+  const pos = i < n / 2 ? i + 1 : n - i // 1..half, mirrored
+  return pos / half
+}
+
+// Deterministic normalized z (0..1, fore-ward) for the `count` instances of a
+// module, spread evenly across the hull length. No per-instance jitter: the
+// strong-symmetry bias places instances on a symmetric grid (paired counts +
+// mirrored placement, see generateModules) so jitter would break the mirror.
+function instanceTs(count, key, _rng) {
+  const spread = {
+    bridge: [0.6, 0.92],
+    commandSpike: [0.6, 0.85],
+    // Nacelles are biased toward MIDSHIP, away from the nose and stern tapers.
+    // The spread [0.2, 0.7] keeps pods in the central 50% of the hull so their
+    // pylon roots mount on the full-girth flank rather than the tapered ends
+    // (where the hull retreats and the flange can lose contact). The pod-length
+    // clamp in buildNacelle reads this spread.
+    nacelles: [0.2, 0.7],
+    weapons: [0.2, 0.85],
+    sensorMast: [0.3, 0.8],
+    antenna: [0.25, 0.9],
+  }
+  const [a, b] = spread[key] ?? [0.2, 0.8]
+  const ts = []
+  for (let i = 0; i < count; i++) {
+    const base = count === 1 ? (a + b) / 2 : a + ((b - a) * i) / (count - 1)
+    ts.push(clamp(base, 0, 1))
+  }
+  return ts
+}
+
+export const MODULE_CATALOG = {
+  bridge: buildBridge,
+  commandSpike: buildCommandSpike,
+  nacelles: buildNacelle,
+  weapons: buildWeapon,
+  sensorMast: buildSensorMast,
+  antenna: buildAntenna,
+  hangar: buildHangar,
+}
+
+export function generateModules(
+  params = {},
+  hullInfo = {},
+  { material = null, hullGroup = null, color = null, glowColor = null } = {}
+) {
+  const group = new THREE.Group()
+  group.name = 'modules'
+
+  const rng = createRng(params._seed ?? 0)
+  const beam = hullInfo.beam ?? 14
+  const height = hullInfo.height ?? 8
+  const length = hullInfo.length ?? 40
+  const hull = {
+    beam,
+    height,
+    length,
+    noseZ: hullInfo.noseZ ?? length / 2,
+    sternZ: hullInfo.sternZ ?? -length / 2,
+  }
+
+  // FIT GUARD: query the hull's real surface so module bases are seated on it
+  // (not the envelope). `hullGroup` is optional — when absent (backward
+  // compatible) the query falls back to the anchor/envelope estimates.
+  const surface = makeSurfaceQuery(hullGroup, hullInfo)
+
+  const mat = material ?? defaultMaterial()
+  // The ship's single emissive colour (palette[3]) drives every glowing part:
+  // the shared window glow, the per-module glows (command spike / sensor mast /
+  // antenna / hangar), the engine glows, the weapon tips, and the glass tints.
+  // One colour per ship = a coherent light signature.
+  const glowMat = makeGlowMaterial(glowColor)
+  // Mild per-module colour variation: each module type gets a subtly different
+  // tone derived from the hull base colour (hue/saturation/brightness shift),
+  // so the superstructure reads as the same family with gentle tonal variety
+  // instead of a single flat material. `color` is the hull base hex; when absent
+  // (e.g. a harness without a palette) the variation is skipped (shared mat).
+  const varyTone = () => {
+    if (!color) return mat
+    const m = mat.clone()
+    m.color = new THREE.Color(varyModuleTone(rng, color))
+    return m
+  }
+
+  const top = resolveAnchor(hullInfo.anchors, 'top', new THREE.Vector3(0, height / 2, 0))
+  const bottom = resolveAnchor(hullInfo.anchors, 'bottom', new THREE.Vector3(0, -height / 2, 0))
+  const port = resolveAnchor(hullInfo.anchors, 'port', new THREE.Vector3(-beam / 2, 0, 0))
+  const starboard = resolveAnchor(hullInfo.anchors, 'starboard', new THREE.Vector3(beam / 2, 0, 0))
+  const fore = resolveAnchor(
+    hullInfo.anchors,
+    'fore',
+    new THREE.Vector3(0, height / 2, hull.noseZ)
+  )
+  const aft = resolveAnchor(
+    hullInfo.anchors,
+    'aft',
+    new THREE.Vector3(0, height / 2, hull.sternZ)
+  )
+
+  const density = clamp(params.density ?? 0.5, 0, 1)
+  const ctxBase = { mat, glowMat, hull, top, bottom, port, starboard, fore, aft, params, surface, glowColor }
+
+  // Strong-symmetry bias: modules are placed as a single "half" group (the
+  // starboard/centreline side) that is then mirrored across the hull
+  // centreline (X). Paired modules get an even count so every instance has an
+  // exact mirror twin; a small set of modules (bridge / command spike /
+  // hangar) may additionally carry a single instance on the centreline. The
+  // per-builder placement is jitter-free (see instanceTs / symmetricT / the
+  // engine layouts) so the mirror is exact.
+  const PAIRED = new Set(['nacelles', 'weapons', 'sensorMast', 'antenna'])
+  const moduleGroup = new THREE.Group()
+  moduleGroup.name = 'modules:half'
+
+  for (const spec of MODULE_SPECS) {
+    const p = params[spec.key] ?? {}
+    const maxCount =
+      spec.key === 'bridge' || spec.key === 'commandSpike'
+        ? Math.max(1, p.count ?? 1)
+        : Math.max(0, p.count ?? 0)
+    let count = moduleCount(spec.key, p, density, maxCount)
+    if (count <= 0) continue
+
+    // Nacelle count depends on the mount:
+    //   waist -> a single pair (count 2) of LONG pods on the midship flank; the
+    //            extra length comes from buildNacelle, not from more instances.
+    //            The waist is NOT mirrored (it's a fixed pair, not a paired
+    //            module), so count 2 gives exactly 2 world pods.
+    //   aft   -> a ring of pods around the stern, whose NUMBER is capped by the
+    //            real stern girth so the bank never overlaps (see aftPodRadius);
+    //            the radius is clamped to the same fit in buildNacelle.
+    let waistSingle = false
+    if (spec.key === 'nacelles') {
+      if (p.mount === 'waist') {
+        // One pair: a single pod in the half-group (placed at +X by buildNacelle)
+        // mirrored to the -X twin, giving exactly 2 world pods. Cap at 1 and skip
+        // the paired even-count forcing (waistSingle) so buildCount stays 1.
+        count = Math.min(count, 1)
+        waistSingle = count > 0
+      } else if (p.mount === 'aft') {
+        const sternGirth = surface.girthAt(aft.z)
+        const requestedRadius = Math.min(hull.beam, hull.height) * 0.2 * (p.size ?? 1)
+        // Cap the per-side count (n) at 8 AND at the count that fits the stern
+        // girth at the requested radius (the radius is clamped to the same fit in
+        // buildNacelle), so the 2n-pod bank never overlaps.
+        count = clamp(count, 1, 8)
+        count = Math.min(count, maxAftN(sternGirth, requestedRadius))
+      }
+    }
+
+    // The waist nacelle is a single fixed pair (one pod per side), not a paired
+    // module: skip the even-count forcing so count 1 yields buildCount 1 (one
+    // pod in the half-group, mirrored to its twin).
+    const paired = PAIRED.has(spec.key) && !waistSingle
+    // Even paired count (so the mirror gives a symmetric set); centreline
+    // modules may also carry one single instance on the centreline.
+    const centreline = !paired && count % 2 === 1
+    const buildCount = centreline ? count - 1 : count
+    const evenCount = paired ? (buildCount % 2 === 1 ? Math.max(2, buildCount + 1) : buildCount) : buildCount
+
+    const ts = instanceTs(evenCount, spec.key, rng)
+
+    // A mildly varied material for this module type (derived from the hull
+    // base colour); falls back to the shared mat when no palette is provided.
+    const modMat = varyTone()
+
+    for (let i = 0; i < evenCount; i++) {
+      // Pass the actual per-side instance count so ring mounts (aft) can spread
+      // their slots across the built count, not the raw config count.
+      const ctx = { ...ctxBase, mat: modMat, i, t: ts[i], n: evenCount }
+      const g = spec.build(rng, ctx)
+      if (g) moduleGroup.add(g)
+    }
+
+    if (centreline) {
+      // A single instance on the centreline (t=0.5), which is its own mirror.
+      const ctx = { ...ctxBase, mat: modMat, i: 0, t: 0.5 }
+      const g = spec.build(rng, ctx)
+      if (g) moduleGroup.add(g)
+    }
+  }
+
+  // Mirror the half-group across the centreline to produce the symmetric pair.
+  // Centreline modules (flagged via userData.isCentreline) are excluded from
+  // the mirror: they sit on the hull's centreline and would overlap with their
+  // own mirror twin.
+  const mirrored = new THREE.Group()
+  mirrored.name = 'modules:mirror'
+  mirrored.scale.x = -1
+  for (const child of moduleGroup.children) {
+    if (child.userData?.isCentreline) {
+      // Centreline module: add to the mirror group without flipping (it's
+      // already symmetric). Actually, just skip it — it's already in
+      // moduleGroup which is added to the ship.
+      continue
+    }
+    const clone = child.clone()
+    mirrored.add(clone)
+  }
+  group.add(moduleGroup)
+  if (mirrored.children.length > 0) group.add(mirrored)
+
+  return group
+}
