@@ -384,57 +384,31 @@ function buildLofted(archetype, params, profile, m, halfLen) {
   return mesh
 }
 
-// Disc archetype (new): a solid of revolution. The upper and lower surfaces
-// are each the revolution of a smooth curve (convex or concave), and the edge
-// is either a cylinder or the frustum of a cone whose two radii correspond to
-// the radii of the upper and lower surfaces at the edge. Built as a lathe
-// geometry (THREE.LatheGeometry) from a 2D profile in the X-Y plane (X =
-// radius, Y = height), revolved around the Y axis, then rotated so the disc's
-// axis aligns with Z (forward).
+// Disc archetype: a solid of revolution. The upper and lower surfaces are each
+// the revolution of a smooth curve (convex or concave) around the Y axis. The
+// disc's flat faces point up/down (Y), and the travel direction (+Z) lies in
+// the disc's plane. Built as a LatheGeometry from a bottom-to-top 2D profile
+// (X = radius, Y = height) for correct outward-facing normals.
 function buildDiscSolid(params, discParams = {}) {
   const { beam, height, length } = params
   const g = new THREE.Group()
   g.name = 'hull'
 
-  // Disc dimensions: the disc spans the full beam (diameter) and a fraction of
-  // the length (depth). The height is split between upper and lower surfaces.
   const radius = beam / 2
-  const depth = length * 0.5 // the disc's Z extent
-
-  // Upper/lower surface curves: each is a smooth curve from the center (r=0)
-  // to the edge (r=radius). The curve's height at the center is the surface's
-  // peak; at the edge it meets the edge radius.
-  //   convex -> the curve bulges outward (dome-like, peak at center).
-  //   concave -> the curve scoops inward (bowl-like, peak at edge).
   const upperCurve = discParams.upperCurve === 'concave' ? 'concave' : 'convex'
   const lowerCurve = discParams.lowerCurve === 'concave' ? 'concave' : 'convex'
-  const upperPeak = height * 0.5 // upper surface peak (above centerline)
-  const lowerPeak = height * 0.5 // lower surface peak (below centerline)
+  const upperPeak = height * 0.5
+  const lowerPeak = height * 0.5
+  const upperEdgeY = height * 0.12
+  const lowerEdgeY = -height * 0.12
 
-  // Build the 2D profile (X = radius from center, Y = height from centerline).
-  // The profile is a closed loop: upper surface from center to edge, down the
-  // edge, lower surface from edge to center, and back to the start.
-  const N = 32 // radial resolution
+  // Profile traced bottom-to-top (required for outward normals in LatheGeometry):
+  // lower surface center→edge, up the edge, upper surface edge→center.
+  const N = 32
   const points = []
-  // Upper surface: from center (r=0, y=upperPeak) to edge (r=radius, y=upperEdgeY).
-  const upperEdgeY = height * 0.12 // the upper surface's Y at the edge
-  const lowerEdgeY = -height * 0.12 // the lower surface's Y at the edge
+  // Lower surface: center (r=0, y=-lowerPeak) to edge (r=radius, y=lowerEdgeY).
   for (let i = 0; i <= N; i++) {
-    const t = i / N // 0 = center, 1 = edge
-    const r = t * radius
-    // Convex: peaks at center (t=0), eases to the edge. Concave: dips at center,
-    // rises to the edge.
-    let y
-    if (upperCurve === 'convex') {
-      y = upperEdgeY + (upperPeak - upperEdgeY) * Math.cos(t * Math.PI * 0.5)
-    } else {
-      y = upperEdgeY + (upperPeak - upperEdgeY) * Math.pow(1 - t, 2)
-    }
-    points.push(new THREE.Vector2(r, y))
-  }
-  // Lower surface: from edge (r=radius, y=lowerEdgeY) to center (r=0, y=-lowerPeak).
-  for (let i = N; i >= 0; i--) {
-    const t = i / N // 1 = edge, 0 = center
+    const t = i / N
     const r = t * radius
     let y
     if (lowerCurve === 'convex') {
@@ -444,19 +418,25 @@ function buildDiscSolid(params, discParams = {}) {
     }
     points.push(new THREE.Vector2(r, y))
   }
-
-  // The edge: a cylinder or frustum connecting the upper and lower edge points.
-  // The profile above already includes the edge as a vertical line (from
-  // upperEdgeY to lowerEdgeY at r=radius), so the lathe handles it.
+  // Upper surface: edge (r=radius, y=upperEdgeY) to center (r=0, y=upperPeak).
+  for (let i = N; i >= 0; i--) {
+    const t = i / N
+    const r = t * radius
+    let y
+    if (upperCurve === 'convex') {
+      y = upperEdgeY + (upperPeak - upperEdgeY) * Math.cos(t * Math.PI * 0.5)
+    } else {
+      y = upperEdgeY + (upperPeak - upperEdgeY) * Math.pow(1 - t, 2)
+    }
+    points.push(new THREE.Vector2(r, y))
+  }
 
   const lathe = new THREE.LatheGeometry(points, 48)
-  // The lathe revolves around the Y axis. Rotate so the disc's axis (Y) aligns
-  // with Z (forward), and the disc's flat faces point fore/aft.
-  lathe.rotateX(Math.PI / 2)
-  // Scale the Z extent to match the disc's depth (the lathe's Y extent becomes
-  // Z after rotation; scale it to span [-halfDepth, +halfDepth]).
-  const latheH = height // the lathe's Y extent (upperPeak + lowerPeak)
-  const zScale = depth / latheH
+  // The lathe axis is Y (up). The disc's flat faces already point up/down and
+  // its diameter spans the X-Z plane — no rotation needed. Stretch Z so the
+  // disc spans a fraction of the ship's length (the lathe's natural Z extent
+  // is the full diameter = beam).
+  const zScale = (length * 0.8) / beam
   const mesh = new THREE.Mesh(lathe)
   mesh.scale.set(1, 1, zScale)
   mesh.name = 'hull:disc:solid'
@@ -658,21 +638,9 @@ function buildInsect(params) {
   ventral.position.set(0, -thoraxH * 0.75, (thoraxStart + headStart) / 2)
   ventral.name = 'hull:thorax:ventral'
   g.add(ventral)
-  // Side struts: 4 vertical connectors linking the dorsal and ventral plates.
-  const strutR = beam * 0.06
-  const strutH = thoraxH * 1.5
-  const strutZ = [thoraxStart + thoraxLen * 0.15, thoraxStart + thoraxLen * 0.5, thoraxStart + thoraxLen * 0.85]
-  for (const sz of strutZ) {
-    for (const sx of [-1, 1]) {
-      const strut = new THREE.Mesh(new THREE.CylinderGeometry(strutR, strutR, strutH, 8))
-      strut.position.set(sx * thoraxR * 0.8, 0, sz)
-      strut.name = 'hull:thorax:strut'
-      g.add(strut)
-    }
-  }
-  // Side hull fill: a box connecting the struts (fills the gap between dorsal
+  // Side hull fill: a box connecting the dorsal
   // and ventral plates on the sides).
-  const fill = new THREE.Mesh(new THREE.BoxGeometry(thoraxR * 1.6, strutH * 0.6, thoraxLen * 0.9))
+  const fill = new THREE.Mesh(new THREE.BoxGeometry(thoraxR * 1.6, thoraxH * 0.9, thoraxLen * 0.9))
   fill.position.set(0, 0, (thoraxStart + headStart) / 2)
   fill.name = 'hull:thorax:fill'
   g.add(fill)
@@ -837,6 +805,15 @@ export function generateHull(params = {}) {
     foreZ: halfLen,
     aftZ: -halfLen,
   })
+
+  // Twin hull: the top/bottom anchors must point to the crossbeam (the only
+  // surface at x=0), not the tube extrema. The tubes are offset in X; modules
+  // placed at the centreline need the crossbeam height.
+  if (archetype === 'twin') {
+    const crossH = height * 0.14
+    info.anchors.top.set(0, crossH + centerY, 0)
+    info.anchors.bottom.set(0, -crossH + centerY, 0)
+  }
 
   return { group, info }
 }

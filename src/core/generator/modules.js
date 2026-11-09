@@ -454,12 +454,17 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
   // Nearest hull surface extent in a given direction at a z. `dir` is one of
   // 'top' | 'bottom' | 'side' | 'aft' | 'fore'. Returns the surface coordinate
   // in that direction (a signed Y, |X|, or Z). Pure in (hullGroup, hullInfo, z).
+  // For twin hulls, 'top'/'bottom' use the anchor (crossbeam) rather than the
+  // geometry extrema (tube tops), since centreline modules seat on the crossbeam.
+  const isTwin = hullInfo.archetype === 'twin'
   function surfaceAt(dir, z) {
     const b = binIndex(z)
     switch (dir) {
       case 'top':
+        if (isTwin) return top.y
         return hasGeometry ? interp(b, 'maxY', top.y) : top.y
       case 'bottom':
+        if (isTwin) return bottom.y
         return hasGeometry ? interp(b, 'minY', bottom.y) : bottom.y
       case 'side': {
         const mx = hasGeometry ? Math.abs(interp(b, 'maxX', starboard.x)) : Math.abs(starboard.x)
@@ -694,7 +699,7 @@ function buildBridge(rng, ctx) {
       g = buildBridgeDome(base)
       break
     case 'nose':
-      g = buildBridgeNose(base)
+      g = buildBridgeNose(rng, base)
       break
     case 'capsule':
       g = buildBridgeCapsule(rng, base)
@@ -711,42 +716,99 @@ function buildBridge(rng, ctx) {
   return g
 }
 
-// Nose: a forward cockpit hunched on the very tip of the hull — the bridge sits
-// at the bow rather than midship, reading as a low, pointed glass cockpit that
-// tapers into the nose. Always placed at the hull's fore tip (fore.z), ignoring
-// the per-instance `t`, so it crowns the nose regardless of count/density.
-function buildBridgeNose(b) {
+// Nose: a forward-facing cockpit at the very tip of the hull. Three sub-styles:
+//   strut:   low base + 2 angled struts + flat faceted canopy + visor.
+//   twin:    low platform + two small faceted domes side by side + visor.
+//   hooded:  base + single large dome + solid spine/deflector on top + visor.
+// Always placed at the fore tip (fore.z), ignoring per-instance `t`.
+function buildBridgeNose(rng, b) {
   const { mat, glowMat, glass, w, h, d, topY, fore } = b
   const group = new THREE.Group()
   group.name = 'bridge:nose'
 
-  // Seat the cockpit at the hull's very tip: the fore anchor's z, pulled back a
-  // fraction of the cockpit depth so the base embeds into the nose (not floating
-  // past it). The deck height at the tip (topY) is the local reference.
-  const tipZ = fore.z - d * 0.2
-  const tipY = topY + h * 0.1
+  const tipZ = fore.z - d * 0.25
+  const tipY = topY
+  const baseW = w * 0.72
+  const baseH = h * 0.18
+  const baseD = d * 0.55
 
-  // A short, low mat collar hunched at the very tip of the deck.
-  const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.5, w * 0.62, h * 0.34, 8), mat)
-  collar.name = 'bridgeNoseCollar'
-  collar.position.set(0, tipY + h * 0.2, tipZ - d * 0.1)
-  group.add(collar)
+  // Shared base platform: a low, wide rounded cylinder.
+  const base = new THREE.Mesh(new THREE.CylinderGeometry(baseW * 0.5, baseW * 0.55, baseH, 12), mat)
+  base.name = 'bridgeNoseBase'
+  base.scale.set(1, 1, baseD / baseW)
+  base.position.set(0, tipY + baseH * 0.5, tipZ)
+  group.add(base)
 
-  // A faceted glass canopy (glass), pointed toward the bow (stretched +Z) so it
-  // reads as a nose cone rather than a dome. Truncated icosahedron for the
-  // multi-facet "frustrated points" look.
-  const canopyR = w * 0.5
-  const canopy = new THREE.Mesh(makeTruncatedIcosahedron(canopyR), glass)
-  canopy.name = 'bridgeNoseGlass'
-  canopy.scale.set(w / canopyR, (h * 0.55) / canopyR, (d * 0.7) / canopyR)
-  canopy.position.set(0, tipY + h * 0.4, tipZ)
-  group.add(canopy)
-
-  // A thin glowing visor line (glow) at the canopy's base.
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(w * 0.42, h * 0.05, d * 0.6), glowMat)
+  // Shared forward visor: a thin, wide rounded slit.
+  const visor = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), glowMat)
   visor.name = 'bridgeNoseVisor'
-  visor.position.set(0, tipY + h * 0.3, tipZ - d * 0.05)
+  visor.scale.set(baseW * 0.35, h * 0.015, h * 0.01)
+  visor.position.set(0, tipY + baseH * 0.7, tipZ + baseD * 0.45)
   group.add(visor)
+
+  const style = rng.pick(['strut', 'twin', 'hooded'])
+
+  if (style === 'strut') {
+    // Side struts: two angled supports connecting the base to the canopy.
+    const strutW = w * 0.06
+    const strutH = h * 0.22
+    const strutD = d * 0.08
+    for (const sx of [-1, 1]) {
+      const strut = new THREE.Mesh(new THREE.BoxGeometry(strutW, strutH, strutD), mat)
+      strut.name = 'bridgeNoseStrut'
+      strut.position.set(sx * baseW * 0.38, tipY + baseH + strutH * 0.4, tipZ + baseD * 0.15)
+      strut.rotation.z = sx * -0.15
+      group.add(strut)
+    }
+    // Flat, wide, forward-stretched faceted canopy.
+    const canR = w * 0.32
+    const canopy = new THREE.Mesh(makeTruncatedIcosahedron(canR), glass)
+    canopy.name = 'bridgeNoseGlass'
+    canopy.scale.set((baseW * 0.42) / canR, (h * 0.22) / canR, (d * 0.38) / canR)
+    canopy.position.set(0, tipY + baseH + h * 0.12, tipZ + d * 0.08)
+    group.add(canopy)
+  } else if (style === 'twin') {
+    // Two small faceted domes side by side (tandem seating).
+    const domeR = w * 0.2
+    const domeGap = w * 0.14
+    for (const sx of [-1, 1]) {
+      const dome = new THREE.Mesh(makeTruncatedIcosahedron(domeR), glass)
+      dome.name = 'bridgeNoseDome'
+      dome.scale.set(
+        (w * 0.22) / domeR,
+        (h * 0.28) / domeR,
+        (d * 0.32) / domeR,
+      )
+      dome.position.set(sx * domeGap, tipY + baseH + h * 0.16, tipZ + d * 0.06)
+      group.add(dome)
+    }
+    // Centre divider: a thin solid rib between the two domes.
+    const rib = new THREE.Mesh(new THREE.BoxGeometry(w * 0.04, h * 0.24, d * 0.28), mat)
+    rib.name = 'bridgeNoseRib'
+    rib.position.set(0, tipY + baseH + h * 0.14, tipZ + d * 0.06)
+    group.add(rib)
+  } else {
+    // Hooded: a single larger dome with a solid spine/deflector above it.
+    const domeR = w * 0.3
+    const dome = new THREE.Mesh(makeTruncatedIcosahedron(domeR), glass)
+    dome.name = 'bridgeNoseGlass'
+    dome.scale.set(
+      (baseW * 0.38) / domeR,
+      (h * 0.26) / domeR,
+      (d * 0.42) / domeR,
+    )
+    dome.position.set(0, tipY + baseH + h * 0.14, tipZ + d * 0.08)
+    group.add(dome)
+    // Spine/deflector: a solid angular plate above and behind the dome.
+    const spineW = w * 0.12
+    const spineH = h * 0.14
+    const spineD = d * 0.5
+    const spine = new THREE.Mesh(new THREE.BoxGeometry(spineW, spineH, spineD), mat)
+    spine.name = 'bridgeNoseSpine'
+    spine.position.set(0, tipY + baseH + h * 0.32, tipZ - d * 0.05)
+    spine.rotation.x = -0.12
+    group.add(spine)
+  }
 
   return group
 }
@@ -842,7 +904,7 @@ function buildBridgeCapsule(rng, b) {
   const capsuleR = w * 0.42
   const capsuleLen = d * 0.7
   const xStretch = 2.2
-  const hasBevel = rng.chance(0.5)
+  const hasBevel = true
   const bevelT = hasBevel ? capsuleR * 0.12 : 0
   const bevelS = hasBevel ? capsuleR * 0.1 : 0
 
@@ -895,15 +957,22 @@ function buildBridgeCapsule(rng, b) {
     flange.position.set(0, topY + h * 0.035, z)
     group.add(flange)
 
-    capY = topY + neckH + capsuleR * 0.9
+    // Distance from capsule center to its lowest point (varies by side count).
+    let capBottom = 0
+    for (let k = 0; k < sides; k++) {
+      const sy = Math.sin((k / sides) * Math.PI * 2 + rotY)
+      if (-sy > capBottom) capBottom = -sy
+    }
+    capY = topY + neckH + capBottom * capsuleR
   }
 
   // Capsule body: a regular polygon extruded along +Z (the travel axis),
-  // stretched in X. rotY = PI/sides orients the polygon: flat top for 4/8,
-  // point at top for 6. Optional bevel on the fore/aft edges.
+  // stretched in X. The polygon is pre-rotated by rotY = PI/sides in the
+  // shape vertices (flat top for 4/8, point at top for 6). Optional bevel on
+  // the fore/aft edges.
   const polyShape = new THREE.Shape()
   for (let k = 0; k < sides; k++) {
-    const angle = (k / sides) * Math.PI * 2
+    const angle = (k / sides) * Math.PI * 2 + rotY
     const px = Math.cos(angle) * capsuleR
     const py = Math.sin(angle) * capsuleR
     if (k === 0) polyShape.moveTo(px, py)
@@ -923,7 +992,6 @@ function buildBridgeCapsule(rng, b) {
   const capsule = new THREE.Mesh(capsuleGeo, capsuleMat)
   capsule.name = isGlass ? 'bridgeCapsuleGlass' : 'bridgeCapsulePrism'
   capsule.scale.set(xStretch, 1, 1)
-  capsule.rotation.y = rotY
   capsule.position.set(0, capY, capZ)
   group.add(capsule)
 
@@ -941,12 +1009,12 @@ function buildBridgeCapsule(rng, b) {
     cap.position.set(0, capY, capZ + foreZ + capLen * 0.5)
     group.add(cap)
   } else {
+    const capGeo = new THREE.ExtrudeGeometry(polyShape, { depth: h * 0.04, bevelEnabled: false })
+    capGeo.translate(0, 0, -(h * 0.04) / 2)
     for (const [name, dz] of [['bridgeCapsulePrismCapFore', 1], ['bridgeCapsulePrismCapAft', -1]]) {
-      const endCap = new THREE.Mesh(new THREE.CylinderGeometry(capsuleR, capsuleR, h * 0.04, sides), mat)
+      const endCap = new THREE.Mesh(capGeo, mat)
       endCap.name = name
       endCap.scale.set(xStretch, 1, 1)
-      endCap.rotation.y = rotY
-      endCap.rotation.x = Math.PI / 2
       endCap.position.set(0, capY, capZ + dz * (capsuleLen * 0.5 + bevelT + h * 0.02))
       group.add(endCap)
     }
@@ -1448,7 +1516,7 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
     group.add(prism)
     // Pointed caps (same radius/segments as the prism, base flush with the
     // prism end — reads as a facet carved off the crystal).
-    const capLen = len * 0.1
+    const capLen = len * 0.2
     const prismEnd = prismLen / 2
     const noseCap = new THREE.Mesh(new THREE.ConeGeometry(prismR, capLen, 6), crystalGlass)
     noseCap.name = 'nacelleCrystalNose'
@@ -2631,17 +2699,19 @@ export function generateModules(
   // antenna / hangar), the engine glows, the weapon tips, and the glass tints.
   // One colour per ship = a coherent light signature.
   const glowMat = makeGlowMaterial(glowColor)
-  // Mild per-module colour variation: each module type gets a subtly different
-  // tone derived from the hull base colour (hue/saturation/brightness shift),
-  // so the superstructure reads as the same family with gentle tonal variety
-  // instead of a single flat material. `color` is the hull base hex; when absent
-  // (e.g. a harness without a palette) the variation is skipped (shared mat).
-  const varyTone = () => {
-    if (!color) return mat
-    const m = mat.clone()
-    m.color = new THREE.Color(varyModuleTone(rng, color))
-    return m
+  // Component variant materials: 3 variants derived from the hull base colour
+  // with distinct hue/saturation/brightness shifts. Module types are assigned
+  // to variants by index so paired components (same type) share the same
+  // variant. When no palette is provided, all modules use the shared mat.
+  const variants = []
+  if (color) {
+    for (let vi = 0; vi < 3; vi++) {
+      const v = mat.clone()
+      v.color = new THREE.Color(varyModuleTone(rng, color, 0.25))
+      variants.push(v)
+    }
   }
+  const variantFor = (idx) => (variants.length ? variants[idx % variants.length] : mat)
 
   const top = resolveAnchor(hullInfo.anchors, 'top', new THREE.Vector3(0, height / 2, 0))
   const bottom = resolveAnchor(hullInfo.anchors, 'bottom', new THREE.Vector3(0, -height / 2, 0))
@@ -2719,9 +2789,8 @@ export function generateModules(
 
     const ts = instanceTs(evenCount, spec.key, rng)
 
-    // A mildly varied material for this module type (derived from the hull
-    // base colour); falls back to the shared mat when no palette is provided.
-    const modMat = varyTone()
+    // Assign a variant material to this module type (by spec index).
+    const modMat = variantFor(MODULE_SPECS.indexOf(spec))
 
     for (let i = 0; i < evenCount; i++) {
       // Pass the actual per-side instance count so ring mounts (aft) can spread
