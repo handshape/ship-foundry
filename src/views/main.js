@@ -5,7 +5,7 @@ import { storage } from '../persistence/storage.js'
 import { buildShipRecord, shipStats, captureThumbnail } from '../persistence/record.js'
 import { onCleanup } from '../app/cleanup.js'
 import { appState } from '../app/state.js'
-import { listAesthetics, applyAesthetic } from '../core/aesthetics/index.js'
+import { listAesthetics, applyAesthetic, AESTHETICS } from '../core/aesthetics/index.js'
 import { createRng } from '../core/generator/rng.js'
 import { normalizeConfig, randomAestheticId, randomPalette } from '../core/generator/config.js'
 import { paramControls } from '../harness/controls.js'
@@ -634,7 +634,28 @@ export function mainView() {
   // the aesthetic once (one-time "new ship" step) so the store holds a concrete,
   // fully-resolved config. Then generate + render.
   const initial = appState.get()
-  const bootCfg = normalizeConfig(applyAesthetic(initial.aesthetic, initial, createRng(initial.seed)))
+  // If the URL has ?seed=N and/or ?aesthetic=X, boot a fresh config from the
+  // seed (same path as the Randomize button) so a specific ship can be
+  // reproduced from the URL alone. Without these params, use the existing
+  // appState config.
+  const urlParams = new URLSearchParams(window.location.search)
+  const urlSeed = urlParams.has('seed') ? parseInt(urlParams.get('seed'), 10) : null
+  const urlAesthetic = urlParams.get('aesthetic') || null
+  let bootCfg
+  if (Number.isFinite(urlSeed)) {
+    const seed = urlSeed
+    const rng = createRng(seed)
+    const raw = randomConfig(seed)
+    // Always call randomAestheticId to advance the RNG (matching the Randomize
+    // button's consumption order), but use the URL-pinned aesthetic if provided.
+    const rolledAesthetic = randomAestheticId(rng)
+    const aestheticId = urlAesthetic && AESTHETICS[urlAesthetic] ? urlAesthetic : rolledAesthetic
+    raw.aesthetic = aestheticId
+    raw.texture.palette = randomPalette(rng)
+    bootCfg = normalizeConfig(applyAesthetic(aestheticId, raw, rng))
+  } else {
+    bootCfg = normalizeConfig(applyAesthetic(initial.aesthetic, initial, createRng(initial.seed)))
+  }
   appState.setConfig(bootCfg)
   buildAestheticSelect(bootCfg)
   buildControls(bootCfg)

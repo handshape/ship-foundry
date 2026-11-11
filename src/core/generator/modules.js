@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { createRng } from './rng.js'
 import { varyModuleTone } from './config.js'
+import { TWIN_TUBE_OFFSET, TWIN_CROSSBEAM_H } from './hull.js'
 
 // SUPERSTRUCTURE & MODULES (SP-05 owns the full catalog).
 //
@@ -653,7 +654,19 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
     return Math.max(r, floor)
   }
 
-  return { surfaceAt, girthAt, surfaceRadiusAt, bestGirthZ, maxSideAt, hasGeometry }
+  // Tube surface query for twin hulls: returns the actual geometry's max/min Y
+  // at a given Z (the tube's upper/lower surface, following the taper), unlike
+  // surfaceAt which returns the fixed anchor for twin hulls. Non-twin hulls
+  // just delegate to surfaceAt.
+  function tubeSurfaceAt(dir, z) {
+    if (!isTwin) return surfaceAt(dir, z)
+    const b = binIndex(z)
+    if (dir === 'top') return hasGeometry ? interp(b, 'maxY', top.y) : top.y
+    if (dir === 'bottom') return hasGeometry ? interp(b, 'minY', bottom.y) : bottom.y
+    return surfaceAt(dir, z)
+  }
+
+  return { surfaceAt, tubeSurfaceAt, girthAt, surfaceRadiusAt, bestGirthZ, maxSideAt, hasGeometry }
 }
 
 // --- module builders ---------------------------------------------------------
@@ -1407,7 +1420,7 @@ function buildNacelle(rng, ctx) {
   if (mount === 'pylon') {
     // Long, thin pod on a swept strut. Spread [0.2, 0.7] (midship-biased).
     r = Math.min(hull.beam, hull.height) * 0.16 * s
-    const baseLen = hull.length * 0.32 * s
+    const baseLen = hull.length * 0.64 * s
     const zSpread = (0.7 - 0.2) * hull.length
     const maxLenBySpacing = n > 1 ? (zSpread / (n - 1)) * 0.82 : baseLen
     len = Math.min(baseLen, maxLenBySpacing)
@@ -1441,7 +1454,7 @@ function buildNacelle(rng, ctx) {
     const requestedRadius = Math.min(hull.beam, hull.height) * 0.2 * s
     const perSide = Math.max(1, ctx.n ?? n)
     r = aftPodRadius(sternGirth, perSide, requestedRadius)
-    len = hull.length * 0.15 * s
+    len = hull.length * 0.30 * s
     // The aft pods wrap the FULL stern ring. `n` instances are built in the
     // half-group across the RIGHT half-ring (angle -PI/2 .. PI/2 in the X-Y
     // plane, i.e. from bottom through +X/starboard to top). The mirror (flip X)
@@ -1498,7 +1511,7 @@ function buildNacelle(rng, ctx) {
     // world pods) and the pod is LONGER than the pylon length, so the single
     // pair reads as a long engine block rather than a short pod.
     r = Math.min(hull.beam, hull.height) * 0.18 * s
-    len = hull.length * 0.42 * s
+    len = hull.length * 0.84 * s
     // Waist = midship: place around the centre (t maps across the midship band).
     z = lerp(-hull.length * 0.25, hull.length * 0.1, t)
     // Use the windowed max side extent (not the single-bin value) so the pod
@@ -1680,7 +1693,7 @@ function buildWeapon(rng, ctx) {
   const { hull, fore, bottom, surface, color, accent } = ctx
   const cfg = ctx.params.weapons
   const style = WEAPON_STYLES.includes(cfg.style) ? cfg.style : 'turret'
-  const position = WEAPON_POSITIONS.includes(cfg.position) ? cfg.position : 'top'
+  let position = WEAPON_POSITIONS.includes(cfg.position) ? cfg.position : 'top'
   const glowMat = weaponGlowMat(style, ctx.glowMat)
   // Weapons get their OWN material, derived from the palette's ACCENT colour
   // (palette[2] passed in as `accent`) — the saturated, identity colour of each
@@ -1725,8 +1738,19 @@ function buildWeapon(rng, ctx) {
   // not a line along the length. Force z=0 so the weapon mounts at the disc's
   // centre rather than 40% toward the nose.
   const isDiscBelly = position === 'belly' && isDisc
+  const isTwin = hull.archetype === 'twin'
+  // Twin hull constraints:
+  //   - Single nose / chin mounts are forbidden → reposition to top / bottom
+  //     (centre of the crossbeam).
+  //   - Single top / bottom → centre of the crossbeam's upper / lower surface.
+  //   - Paired top → tube tops (Y along +Y), paired bottom → tube bottoms
+  //     (Y along -Y).
+  if (isTwin) {
+    if (position === 'nose' && n === 1) position = 'top'
+    else if (position === 'chin' && n === 1) position = 'belly'
+  }
   const z = position === 'nose' ? fore.z * 0.94
-    : isDiscBelly ? 0
+    : isDiscBelly || (isTwin && position === 'belly') ? 0
     : lerp(0, fore.z, t * 0.8)
   // Halved from 0.6 -> 0.3 so weapons read as compact gun emplacements, not
   // bulky blocks. The len factor is halved proportionally (0.55 -> 0.275).
@@ -1761,48 +1785,81 @@ function buildWeapon(rng, ctx) {
     mountY = bottomExt * 0.55
     barrelY = mountY + dirY * R * 0.2
   } else if (position === 'belly') {
-    // Belly / ventral: a line of weapons down the keel (bottom surface), spread
-    // fore/aft along the lower hull. The mount Y is the LOWER of (a) the hull's
-    // actual bottom surface at this Z and (b) the hull's design keel line
-    // (bottom.y). For tapered archetypes (wedge, insect, saucer, disc) the
-    // per-Z bottom surface can retreat well above the keel at forward/stern
-    // stations; without the keel floor the weapon would mount mid-hull instead
-    // of on the keel. The keel floor keeps the line of weapons on the hull's
-    // true bottom regardless of local taper.
-    const bottomExt = surface.surfaceAt('bottom', z)
-    const keelY = bottom?.y ?? -hull.height * 0.5
-    mountX = 0
-    mountY = Math.min(bottomExt, keelY) - R * 0.18
-    barrelY = mountY + dirY * R * 0.2
-    // The belly weapon's barrel is built along local -Y (dirY=-1 puts the
-    // barrel below the mount). We want the barrel to point along the outward
-    // normal (straight down, -Y world). Since the barrel is at local -Y, we
-    // align local +Y with the INWARD normal (0, +1, 0) so that local -Y (the
-    // barrel) maps to (0, -1, 0) (down, outward).
-    surfaceNormal = new THREE.Vector3(0, 1, 0)
+    if (isTwin) {
+      // Twin belly: single → centre of the crossbeam's lower surface; paired →
+      // tube bottoms (Y along -Y). The tube surface height at this Z is the
+      // overall envelope bottom scaled by the tube height fraction, so the
+      // mount follows the hull's taper.
+      const tubeOffset = hull.beam * TWIN_TUBE_OFFSET
+      // Query the actual geometry for the tube bottom at this Z (the bins
+      // capture the tube vertices, so minY is the tube's lower surface, not
+      // the crossbeam). Falls back to the anchor if no geometry is available.
+      const tubeBottom = surface.tubeSurfaceAt('bottom', z)
+      const crossbeamBottom = -(hull.height * TWIN_CROSSBEAM_H) / 2
+      if (n === 1) {
+        mountX = 0
+        mountY = crossbeamBottom - R * 0.18
+      } else {
+        mountX = (i % 2 === 0 ? -1 : 1) * tubeOffset
+        mountY = tubeBottom - R * 0.18
+      }
+      barrelY = mountY + dirY * R * 0.2
+      surfaceNormal = new THREE.Vector3(0, 1, 0)
+    } else {
+      // Belly / ventral: a line of weapons down the keel (bottom surface),
+      // spread fore/aft along the lower hull.
+      const bottomExt = surface.surfaceAt('bottom', z)
+      const keelY = bottom?.y ?? -hull.height * 0.5
+      mountX = 0
+      mountY = Math.min(bottomExt, keelY) - R * 0.18
+      barrelY = mountY + dirY * R * 0.2
+      surfaceNormal = new THREE.Vector3(0, 1, 0)
+    }
   } else {
     // Top (default): the classic upper girdle ring, spread around the deck.
-    // Each weapon seats on the hull's ACTUAL surface: `surfaceRadiusAt` gives
-    // the true surface distance in the weapon's direction (anisotropic
-    // cross-section, two-tube aware). We place the base at that radius and
-    // embed it slightly inward so the housing sits flush on (or just inside)
-    // the deck rather than floating in the air above it.
-    const angle = (i / n) * PI2
-    const surfR = surface.surfaceRadiusAt(angle, z)
-    const embed = R * 0.18 // sink the base a touch into the hull so it seats
-    const rr = Math.max(surfR - embed, surfR * 0.5)
-    mountX = Math.cos(angle) * rr
-    mountY = Math.sin(angle) * rr
-    barrelY = mountY + dirY * R * 0.25
-    // Outward normal of the cross-section ellipse at this angle: the gradient
-    // of (x²/halfX² + y²/halfY²) at (cosθ, sinθ), i.e. (cosθ/halfX, sinθ/halfY).
-    const halfX = Math.max(surface.surfaceAt('side', z), 1e-3)
-    const halfY = Math.max(surface.surfaceAt('top', z), 1e-3)
-    surfaceNormal = new THREE.Vector3(
-      Math.cos(angle) / halfX,
-      Math.sin(angle) / halfY,
-      0,
-    ).normalize()
+    if (isTwin) {
+      // Twin top: single → centre of the crossbeam's upper surface; paired →
+      // tube tops (Y along +Y). The tube surface height at this Z is the
+      // overall envelope top scaled by the tube height fraction, so the
+      // mount follows the hull's taper.
+      const tubeOffset = hull.beam * TWIN_TUBE_OFFSET
+      // Query the actual geometry for the tube top at this Z (the bins capture
+      // the tube vertices, so maxY is the tube's upper surface, not the
+      // crossbeam). Falls back to the anchor if no geometry is available.
+      const tubeTop = surface.tubeSurfaceAt('top', z)
+      const crossbeamTop = (hull.height * TWIN_CROSSBEAM_H) / 2
+      if (n === 1) {
+        mountX = 0
+        mountY = crossbeamTop + R * 0.18
+      } else {
+        mountX = (i % 2 === 0 ? -1 : 1) * tubeOffset
+        mountY = tubeTop + R * 0.18
+      }
+      barrelY = mountY + dirY * R * 0.25
+      // Y axis along +Y (no rotation needed — the weapon is already built with
+      // its up-axis along +Y).
+      surfaceNormal = new THREE.Vector3(0, 1, 0)
+    } else {
+      // Each weapon seats on the hull's ACTUAL surface: `surfaceRadiusAt` gives
+      // the true surface distance in the weapon's direction. We place the base
+      // at that radius and embed it slightly inward so the housing sits flush
+      // on (or just inside) the deck rather than floating in the air above it.
+      const angle = (i / n) * PI2
+      const surfR = surface.surfaceRadiusAt(angle, z)
+      const embed = R * 0.18
+      const rr = Math.max(surfR - embed, surfR * 0.5)
+      mountX = Math.cos(angle) * rr
+      mountY = Math.sin(angle) * rr
+      barrelY = mountY + dirY * R * 0.25
+      // Outward normal of the cross-section ellipse at this angle.
+      const halfX = Math.max(surface.surfaceAt('side', z), 1e-3)
+      const halfY = Math.max(surface.surfaceAt('top', z), 1e-3)
+      surfaceNormal = new THREE.Vector3(
+        Math.cos(angle) / halfX,
+        Math.sin(angle) / halfY,
+        0,
+      ).normalize()
+    }
   }
 
   const base = { mat: weaponMat, glowMat, R, len, mountX, mountY, z, barrelX: mountX, barrelY, dirY }
@@ -2821,65 +2878,77 @@ function buildHangarPod(b) {
   return group
 }
 
-// Dock: an open docking gantry — mat struts + crossbar framing an open mouth,
-// with glowing guide-lights lining the entrance AND an emissive back panel
-// recessed inboard, so the open gantry reads as a dark cavity glowing from
-// within (not just an empty frame). `side` is +1 (starboard) or -1 (port); the
-// mouth faces outboard.
+// Dock: a semi-cylindrical docking bay — a curved canopy (half-cylinder shell)
+// with an arched opening facing outboard. The interior back is an emissive disc
+// recessed inboard, and a glowing curved rim (torus segment) lines the opening's
+// edge. A few small emissive guide lights sit along the rim. `side` is +1
+// (starboard) or -1 (port); the opening faces outboard.
 function buildHangarDock(b) {
   const { mat, glowMat, w, h, d, z, cx, cy, side } = b
   const group = new THREE.Group()
   group.name = 'hangar:dock'
 
-  const strutW = w * 0.14
-  const strutGeo = new THREE.BoxGeometry(strutW, h, d)
-  const left = new THREE.Mesh(strutGeo, mat)
-  left.name = 'dockStrutLeft'
-  left.position.set(cx - w * 0.38, cy, z)
-  group.add(left)
-  const right = new THREE.Mesh(strutGeo, mat)
-  right.name = 'dockStrutRight'
-  right.position.set(cx + w * 0.38, cy, z)
-  group.add(right)
+  // The curved canopy: a half-cylinder (180° arc) with the axis along the
+  // inboard direction (X for side mounts). The open end faces outboard. The
+  // cylinder's Y-axis (default) is rotated to align with X.
+  const shellR = Math.min(h, d) * 0.45 // radius of the half-cylinder
+  const shellLen = w * 0.7 // inboard depth of the canopy
+  const shell = new THREE.Mesh(
+    new THREE.CylinderGeometry(shellR, shellR, shellLen, 24, 1, true, Math.PI, Math.PI),
+    mat,
+  )
+  shell.name = 'dockShell'
+  // Rotate so the cylinder's axis (Y) points along X (inboard direction).
+  // The half-cylinder's flat face (the diameter) faces down (-Y in local space),
+  // which maps to the hull surface after rotation.
+  shell.rotation.z = Math.PI / 2 // Y -> X
+  shell.rotation.x = Math.PI / 2 // so the flat face points toward the hull
+  shell.position.set(cx - side * shellLen * 0.5, cy, z)
+  group.add(shell)
 
-  const cross = new THREE.Mesh(new THREE.BoxGeometry(w, strutW, strutW), mat)
-  cross.name = 'dockCrossbar'
-  cross.position.set(cx, cy + h * 0.5, z)
-  group.add(cross)
+  // The outboard face (opening) is at the outer end of the cylinder.
+  const outX = cx + side * (w * 0.5)
 
-  // The BACK of the gantry (emissive): a panel recessed inboard from the mouth,
-  // spanning the opening between the struts. This is the glowing "interior" seen
-  // through the open gantry.
-  const innerW = w * 0.76 - strutW * 2 // width between the inner faces of the struts
-  const back = new THREE.Mesh(new THREE.BoxGeometry(strutW * 0.4, h - strutW, innerW), glowMat)
+  // The back of the bay (emissive): a disc recessed inboard, spanning the
+  // opening. This is the glowing "interior" seen through the arched void.
+  const backR = shellR * 0.85
+  const recess = w * 0.35
+  const back = new THREE.Mesh(new THREE.CircleGeometry(backR, 24), glowMat)
   back.name = 'dockBack'
-  // Recessed inboard: the mouth is at the outboard face; the back sits `recess`
-  // inboard (toward the hull), at the cavity floor.
-  const recess = w * 0.3
-  const backX = cx - side * recess
-  back.position.set(backX, cy, z)
+  back.position.set(outX - side * recess, cy, z)
+  back.rotation.y = side === 1 ? Math.PI / 2 : -Math.PI / 2
   group.add(back)
 
-  // Glowing guide-lights along the front mouth (a horizontal run + two verticals).
-  const lightR = h * 0.04
+  // A glowing curved rim (torus segment, 180°) lining the opening's edge.
+  const rimR = shellR
+  const rimTube = Math.min(h, d) * 0.035
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(rimR, rimTube, 10, 24, Math.PI),
+    glowMat,
+  )
+  rim.name = 'dockRim'
+  // The torus lies in the Y-Z plane by default; rotate so it faces outboard
+  // (perpendicular to X). The arc (Math.PI) covers the top half, matching
+  // the half-cylinder's opening.
+  rim.rotation.y = Math.PI / 2
+  rim.rotation.z = 0 // arc starts at 0 (right side) and sweeps to PI (left side)
+  rim.position.set(outX, cy, z)
+  group.add(rim)
+
+  // A few small emissive guide lights along the curved rim, spaced evenly
+  // across the 180° arc.
+  const lightR = rimTube * 0.6
   const lightGeo = new THREE.SphereGeometry(lightR, 8, 6)
-  const mouthX = w * 0.72
-  const mouthZ = z + d * 0.5 + lightR
-  for (let k = 0; k < 5; k++) {
-    const ly = cy + (k - 2) * (h * 0.18)
+  const lightCount = 5
+  for (let k = 0; k < lightCount; k++) {
+    const angle = (k / (lightCount - 1)) * Math.PI // 0 to PI across the arc
+    const lx = outX
+    const ly = cy + Math.sin(angle) * rimR
+    const lz = z - Math.cos(angle) * rimR
     const light = new THREE.Mesh(lightGeo, glowMat)
     light.name = 'dockGuideLight'
-    light.position.set(cx, ly, mouthZ)
+    light.position.set(lx, ly, lz)
     group.add(light)
-  }
-  for (let k = 0; k < 3; k++) {
-    const lx = cx - mouthX / 2 + (k / 2) * mouthX
-    for (const sgn of [-1, 1]) {
-      const light = new THREE.Mesh(lightGeo, glowMat)
-      light.name = 'dockGuideLight'
-      light.position.set(lx, cy + sgn * h * 0.5, mouthZ)
-      group.add(light)
-    }
   }
 
   return group
@@ -3119,11 +3188,16 @@ export function generateModules(
     // module: skip the even-count forcing so count 1 yields buildCount 1 (one
     // pod in the half-group, mirrored to its twin).
     const paired = PAIRED.has(spec.key) && !waistSingle && !bellySingle
-    // Even paired count (so the mirror gives a symmetric set); centreline
-    // modules may also carry one single instance on the centreline.
+    // For paired modules, the config's `count` is the TOTAL number of instances
+    // (e.g. 4 = 2 per side). The half-group holds one side, so divide by 2 to
+    // get the per-side count. The mirror handles the symmetry — no even-count
+    // forcing is needed (an odd per-side count is fine: 3 per side × 2 = 6).
+    const perSide = paired ? Math.max(1, Math.ceil(count / 2)) : count
+    // Centreline modules (non-paired, odd count) carry one instance on the
+    // centreline (its own mirror) plus an even number off-centre.
     const centreline = !paired && count % 2 === 1
-    const buildCount = centreline ? count - 1 : count
-    const evenCount = paired ? (buildCount % 2 === 1 ? Math.max(2, buildCount + 1) : buildCount) : buildCount
+    const buildCount = centreline ? count - 1 : perSide
+    const evenCount = buildCount
 
     const ts = instanceTs(evenCount, spec.key, rng)
 

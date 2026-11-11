@@ -677,13 +677,22 @@ function buildInsect(params) {
 
 // Twin / split double-hull composite: two parallel lofted tubes (offset in X)
 // joined by a central crossbeam. A genuine composite of several primitives.
+// The proportions below are shared with modules.js (weapon/nacelle placement)
+// so the surface queries match the actual geometry.
+export const TWIN_TUBE_OFFSET = 0.28 // X offset of each tube from centreline (× beam)
+export const TWIN_TUBE_BEAM = 0.42   // tube beam (× hull beam)
+export const TWIN_TUBE_HEIGHT = 0.7  // tube height (× hull height)
+export const TWIN_CROSSBEAM_W = 0.5  // crossbeam width (× hull beam)
+export const TWIN_CROSSBEAM_H = 0.28 // crossbeam height (× hull height)
+export const TWIN_CROSSBEAM_L = 0.4  // crossbeam length (× hull length)
+
 function buildTwin(params, profile, m, halfLen) {
   const { beam, height, length } = params
   const g = new THREE.Group()
   g.name = 'hull'
-  const offset = beam * 0.28
-  const tubeBeam = beam * 0.42
-  const tubeHeight = height * 0.7
+  const offset = beam * TWIN_TUBE_OFFSET
+  const tubeBeam = beam * TWIN_TUBE_BEAM
+  const tubeHeight = height * TWIN_TUBE_HEIGHT
 
   const mk = (x, name) => {
     const tube = buildLofted(
@@ -701,7 +710,7 @@ function buildTwin(params, profile, m, halfLen) {
   g.add(mk(offset, 'hull:tube:starboard'))
 
   const beamMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(beam * 0.5, height * 0.28, length * 0.4),
+    new THREE.BoxGeometry(beam * TWIN_CROSSBEAM_W, height * TWIN_CROSSBEAM_H, length * TWIN_CROSSBEAM_L),
   )
   beamMesh.name = 'hull:crossbeam'
   g.add(beamMesh)

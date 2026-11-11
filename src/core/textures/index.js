@@ -347,7 +347,11 @@ function drawOrganic(ctx, size, rng, base, secondary, glow, style) {
   }
 }
 
-function drawPanelLines(ctx, size, rng, base, secondary, weight) {
+function drawPanelLines(ctx, size, seed, base, secondary, weight) {
+  // Dedicated derived RNG so the jitter values match the normal map's panel
+  // lines (which uses the same offset). The main RNG is NOT consumed here, so
+  // the albedo's other layers (greebles, wear, etc.) are unaffected.
+  const rng = createRng((seed + 31337) >>> 0)
   const cells = 4 + Math.round(weight * 14)
   const step = size / cells
   ctx.save()
@@ -729,18 +733,21 @@ function buildNormalMap(size, rng, p) {
     nctx.stroke()
   }
 
-  // Panel line indentations.
+  // Panel line indentations. Uses the same derived RNG as the albedo's
+  // drawPanelLines (seed + 31337) so the jitter values — and therefore the
+  // groove positions — align exactly with the coloured panel lines.
   if (p.panelLines.enabled) {
+    const plRng = createRng((p.seed + 31337) >>> 0)
     const cells = 4 + Math.round(p.panelLines.weight * 14)
     const step = size / cells
     for (let i = 0; i < cells; i++) {
-      const x = i * step + rng.range(-0.18, 0.18) * step
-      const y = i * step + rng.range(-0.18, 0.18) * step
+      const x = i * step + plRng.range(-0.18, 0.18) * step
+      const y = i * step + plRng.range(-0.18, 0.18) * step
       normalLine(x, 0, x, size, p.panelLines.weight)
       normalLine(0, y, size, y, p.panelLines.weight)
-      // Rivet bumps along the seams.
-      if (rng.chance(0.6)) {
-        const ty = rng.range(0, size)
+      // Rivet bumps along the seams (same 0.5 probability as the albedo).
+      if (plRng.chance(0.5)) {
+        const ty = plRng.range(0, size)
         nctx.fillStyle = 'rgb(128,170,255)'
         nctx.beginPath()
         nctx.arc(x, ty, Math.max(1.5, size * 0.003), 0, Math.PI * 2)
@@ -752,14 +759,21 @@ function buildNormalMap(size, rng, p) {
     }
   }
 
-  // Greeble bumps (raised machinery).
+  // Greeble bumps (raised machinery). Consumes the same 6 RNG values per
+  // greeble as the albedo's drawGreebles (kind, cx, cy, w, h, shade) so the
+  // bump positions align exactly with the coloured greebles. Only cx/cy are
+  // used for the bump centre; the rest are consumed to keep the RNG in sync.
   if (p.greebles.enabled) {
     const gRng = createRng((p.seed + 104729) >>> 0)
     const count = Math.round(60 + p.greebles.density * 400)
     for (let i = 0; i < count; i++) {
+      gRng.int(0, 4) // kind (consumed, not used)
       const cx = gRng.range(0, size)
       const cy = gRng.range(0, size)
-      const rad = gRng.range(size * 0.008, size * 0.03)
+      gRng.range(size * 0.008, size * 0.05) // w (consumed, not used)
+      gRng.range(size * 0.008, size * 0.04) // h (consumed, not used)
+      gRng.range(-0.16, 0.16) // shade (consumed, not used)
+      const rad = Math.max(1, size * 0.008)
       const g = nctx.createRadialGradient(cx, cy, 0, cx, cy, rad)
       g.addColorStop(0, 'rgba(128,128,255,0.4)')
       g.addColorStop(0.5, 'rgba(140,140,230,0.2)')
@@ -1010,7 +1024,7 @@ export function generateTextures(params = {}) {
     const organicRng = createRng((p.seed + 7919) >>> 0)
     drawOrganic(ctx, size, organicRng, base, secondary, glow, p.organic.style)
   }
-  if (p.panelLines.enabled) drawPanelLines(ctx, size, rng, base, secondary, p.panelLines.weight)
+  if (p.panelLines.enabled) drawPanelLines(ctx, size, p.seed, base, secondary, p.panelLines.weight)
   if (p.greebles.enabled) {
     const greebleRng = createRng((p.seed + 104729) >>> 0)
     drawGreebles(ctx, size, greebleRng, base, secondary, accent, p.greebles.density)

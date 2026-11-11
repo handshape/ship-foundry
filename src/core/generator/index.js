@@ -71,6 +71,37 @@ export function generateShip(config = {}, seed) {
   group.add(hull.group)
   group.add(moduleGroup)
 
+  if (typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('debug')) {
+    const m = cfg.modules
+    const t = cfg.texture
+    console.group(`[ship] seed=${cfg.seed} aesthetic=${cfg.aesthetic}`)
+    console.log(`hull: ${cfg.hull.archetype} ${cfg.hull.length}x${cfg.hull.beam}x${cfg.hull.height} ${cfg.hull.crossSection}`)
+    console.log(`palette: ${t.palette?.join(' ')}`)
+    // Bridge
+    const b = m.bridge
+    if (b) console.log(`  bridge: enabled=${b.enabled} size=${b.size} style=${b.style} pos=${b.position}`)
+    // Nacelles
+    const nc = m.nacelles
+    if (nc) {
+      const len = nc.mount === 'pylon' ? 'long' : nc.mount === 'aft' ? 'stubby' : 'waist-long'
+      console.log(`  nacelles: enabled=${nc.enabled} mount=${nc.mount} (${len}) type=${nc.type} count=${nc.count} size=${nc.size} strut=${nc.strut} lift=${nc.lift} angle=${nc.angle} tail=${nc.tail}`)
+    }
+    // Other modules (generic)
+    for (const k of ['commandSpike', 'weapons', 'sensorMast', 'antenna', 'hangar']) {
+      const v = m[k]
+      if (!v || typeof v !== 'object') continue
+      const parts = [`enabled=${v.enabled}`]
+      if (v.count != null) parts.push(`count=${v.count}`)
+      if (v.style != null) parts.push(`style=${v.style}`)
+      if (v.position != null) parts.push(`pos=${v.position}`)
+      if (v.size != null) parts.push(`size=${v.size}`)
+      if (v.height != null) parts.push(`height=${v.height}`)
+      console.log(`  ${k}: ${parts.join(' ')}`)
+    }
+    console.log(`texture: greebles=${t.greebles?.enabled}/${t.greebles?.density} wear=${t.wear?.enabled}/${t.wear?.amount} stripes=${t.stripes?.enabled}/${t.stripes?.count} emblem=${t.emblem?.style} windows=${t.windows?.enabled}/${t.windows?.density}`)
+    console.groupEnd()
+  }
+
   return { group, config: cfg }
 }
 
