@@ -101,7 +101,7 @@ export const SHIP_CONFIG_SCHEMA = {
             // Where along the hull the bridge sits: 0 = stern, 0.5 = midship,
             // 1 = fore/nose. The 'nose' bridge style always snaps to the fore
             // tip regardless of this; other styles read it as the z placement.
-            position: num(0, 1, 0.65),
+            position: num(0, 1, 0.5),
           },
         },
       commandSpike: {

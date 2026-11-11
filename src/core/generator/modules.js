@@ -718,7 +718,7 @@ function buildBridge(rng, ctx) {
   // Position along the hull, from `position` (0 = stern, 0.5 = midship,
   // 1 = fore/nose). The lerp spans the full stern→nose length so the bridge can
   // sit anywhere. The 'nose' style ignores it and always snaps to the very tip.
-  const tPos = style === 'nose' ? 1 : clamp(cfg.position ?? 0.65, 0, 1)
+  const tPos = style === 'nose' ? 1 : clamp(cfg.position ?? 0.5, 0, 1)
   const z = lerp(-fore.z, fore.z, tPos)
   // FIT GUARD: seat the bridge base on the real deck height at this z, not the
   // envelope top anchor (which can be higher on saucer/wedge/insect). The
