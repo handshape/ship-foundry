@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { createRng } from '../generator/rng.js'
+import { DEFAULT_PALETTE, DEFAULT_TEXTURE_SIZE } from '../generator/config.js'
 import Shield from 'lucide/dist/esm/icons/shield.mjs'
 import Cross from 'lucide/dist/esm/icons/cross.mjs'
 import Crown from 'lucide/dist/esm/icons/crown.mjs'
@@ -56,7 +57,39 @@ import Wind from 'lucide/dist/esm/icons/wind.mjs'
 // The same `textureParams` + `seed` always produces identical pixels: all
 // randomness flows from createRng(seed); never Math.random.
 
-const DEFAULT_PALETTE = ['#8a94a6', '#5b6472', '#3a86c8', '#66d9ff']
+// --- texture tuning constants -------------------------------------------------
+// RNG seed salts: each texture layer derives its own RNG from the ship seed +
+// this salt, so the same seed produces aligned features across albedo,
+// roughness, normal, and AO maps.
+const ORGANIC_SEED_SALT = 7919
+const PANEL_SEED_SALT = 31337
+const GREEBLE_SEED_SALT = 104729
+
+// Panel line grid: base cell count + span (cells = base + weight * span).
+const PANEL_BASE_CELLS = 4
+const PANEL_CELL_SPAN = 14
+const PANEL_JITTER = 0.18
+const RIVET_PROB = 0.5
+
+// Greeble count: base + density * span.
+const GREEBLE_BASE = 60
+const GREEBLE_SPAN = 400
+
+// Emblem: fraction of texture size for the icon radius.
+const EMBLEM_RADIUS_FRAC = 0.16
+const LUCIDE_VIEWBOX = 24
+
+// Rust: minimum wear amount before rust appears.
+const RUST_THRESHOLD = 0.2
+const RUST_BASE = 4
+const RUST_SPAN = 20
+
+// Lucide icon viewBox (24x24 coordinate space).
+const DEFAULT_BASE_RGB = (() => {
+  const h = DEFAULT_PALETTE[0].replace('#', '')
+  const n = parseInt(h, 16)
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+})()
 
 // --- color helpers (deterministic) -------------------------------------------
 
@@ -64,7 +97,7 @@ function hexToRgb(hex) {
   const h = String(hex || '').replace('#', '').trim()
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h.padEnd(6, '0')
   const n = parseInt(full.slice(0, 6), 16)
-  if (!Number.isFinite(n)) return [138, 148, 166]
+  if (!Number.isFinite(n)) return [...DEFAULT_BASE_RGB]
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
 }
 
@@ -167,12 +200,12 @@ function rectPathD(x, y, w, h, rx, ry) {
 // to a `box`-size square. Stroke color / width / cap are applied by the caller
 // before the transform so they scale correctly with the icon.
 function drawIcon(ctx, icon, cx, cy, box, color, lineWidth, alpha) {
-  const scale = box / 24
+  const scale = box / LUCIDE_VIEWBOX
   ctx.save()
   ctx.globalAlpha = alpha
   ctx.translate(cx, cy)
   ctx.scale(scale, scale)
-  ctx.translate(-12, -12)
+  ctx.translate(-LUCIDE_VIEWBOX / 2, -LUCIDE_VIEWBOX / 2)
   ctx.strokeStyle = color
   ctx.fillStyle = color
   ctx.lineWidth = lineWidth / scale // keep on-screen width constant after scaling
@@ -219,7 +252,7 @@ function normalizeParams(params = {}) {
       enabled: params.windows?.enabled !== false,
       density: clamp01(params.windows?.density, 0.4),
     },
-    size: clampInt(params.size, 64, 4096, 1024),
+    size: clampInt(params.size, 64, 2048, DEFAULT_TEXTURE_SIZE),
     seed: params.seed ?? 0,
   }
   return p
@@ -351,14 +384,14 @@ function drawPanelLines(ctx, size, seed, base, secondary, weight) {
   // Dedicated derived RNG so the jitter values match the normal map's panel
   // lines (which uses the same offset). The main RNG is NOT consumed here, so
   // the albedo's other layers (greebles, wear, etc.) are unaffected.
-  const rng = createRng((seed + 31337) >>> 0)
-  const cells = 4 + Math.round(weight * 14)
+  const rng = createRng((seed + PANEL_SEED_SALT) >>> 0)
+  const cells = PANEL_BASE_CELLS + Math.round(weight * PANEL_CELL_SPAN)
   const step = size / cells
   ctx.save()
   for (let i = 0; i < cells; i++) {
-    const jitter = rng.range(-0.18, 0.18) * step
+    const jitter = rng.range(-PANEL_JITTER, PANEL_JITTER) * step
     const x = i * step + jitter
-    const y = i * step + rng.range(-0.18, 0.18) * step
+    const y = i * step + rng.range(-PANEL_JITTER, PANEL_JITTER) * step
     ctx.strokeStyle = rgba(...hexToRgb(secondary), 0.45)
     ctx.lineWidth = Math.max(1, size * 0.0016 * (0.6 + weight))
     ctx.beginPath()
@@ -369,7 +402,7 @@ function drawPanelLines(ctx, size, seed, base, secondary, weight) {
     ctx.moveTo(0, y)
     ctx.lineTo(size, y)
     ctx.stroke()
-    if (rng.chance(0.5)) {
+    if (rng.chance(RIVET_PROB)) {
       const ty = rng.range(0, size)
       ctx.fillStyle = rgba(...hexToRgb(base), 0.5)
       ctx.fillRect(x - 1.5, ty, 3, 3)
@@ -380,7 +413,7 @@ function drawPanelLines(ctx, size, seed, base, secondary, weight) {
 }
 
 function drawGreebles(ctx, size, rng, base, secondary, accent, density) {
-  const count = Math.round(60 + density * 400)
+  const count = Math.round(GREEBLE_BASE + density * GREEBLE_SPAN)
   for (let i = 0; i < count; i++) {
     const kind = rng.int(0, 4)
     const cx = rng.range(0, size)
@@ -459,8 +492,8 @@ function drawWear(ctx, size, rng, base, amount) {
 
 // Rust / corrosion: orange-brown patches with rough, mottled edges.
 function drawRust(ctx, size, rng, base, amount) {
-  if (amount < 0.2) return
-  const rustCount = Math.round(4 + amount * 20)
+  if (amount < RUST_THRESHOLD) return
+  const rustCount = Math.round(RUST_BASE + amount * RUST_SPAN)
   for (let i = 0; i < rustCount; i++) {
     const cx = rng.range(0, size)
     const cy = rng.range(0, size)
@@ -517,7 +550,7 @@ function drawEmblem(ctx, size, accent, glow, style) {
   if (!icon) return
   const cx = size * 0.5
   const cy = size * 0.5
-  const R = size * 0.16
+  const R = size * EMBLEM_RADIUS_FRAC
   const [gr, gg, gb] = hexToRgb(glow)
 
   // Glow halo behind the insignia.
@@ -549,13 +582,13 @@ function buildRoughness(size, rng, p) {
 
   // Panel line grooves: darker (smoother) along the seams.
   if (p.panelLines.enabled) {
-    const cells = 4 + Math.round(p.panelLines.weight * 14)
+    const cells = PANEL_BASE_CELLS + Math.round(p.panelLines.weight * PANEL_CELL_SPAN)
     const step = size / cells
     rctx.strokeStyle = 'rgba(80,80,80,0.5)'
     rctx.lineWidth = Math.max(1, size * 0.002 * (0.6 + p.panelLines.weight))
     for (let i = 0; i < cells; i++) {
-      const x = i * step + rng.range(-0.18, 0.18) * step
-      const y = i * step + rng.range(-0.18, 0.18) * step
+      const x = i * step + rng.range(-PANEL_JITTER, PANEL_JITTER) * step
+      const y = i * step + rng.range(-PANEL_JITTER, PANEL_JITTER) * step
       rctx.beginPath()
       rctx.moveTo(x, 0)
       rctx.lineTo(x, size)
@@ -569,8 +602,8 @@ function buildRoughness(size, rng, p) {
 
   // Greeble smoothing (darker = smoother over machinery).
   if (p.greebles.enabled) {
-    const gRng = createRng((p.seed + 104729) >>> 0)
-    const count = Math.round(60 + p.greebles.density * 400)
+    const gRng = createRng((p.seed + GREEBLE_SEED_SALT) >>> 0)
+    const count = Math.round(GREEBLE_BASE + p.greebles.density * GREEBLE_SPAN)
     for (let i = 0; i < count; i++) {
       const cx = gRng.range(0, size)
       const cy = gRng.range(0, size)
@@ -597,8 +630,8 @@ function buildRoughness(size, rng, p) {
       rctx.fillRect(cx - rad, cy - rad, rad * 2, rad * 2)
     }
     // Rust roughening: very rough (near white) over rust patches.
-    if (p.wear.amount > 0.2) {
-      const rustCount = Math.round(4 + p.wear.amount * 20)
+    if (p.wear.amount > RUST_THRESHOLD) {
+      const rustCount = Math.round(RUST_BASE + p.wear.amount * RUST_SPAN)
       for (let i = 0; i < rustCount; i++) {
         const cx = rng.range(0, size)
         const cy = rng.range(0, size)
@@ -680,7 +713,7 @@ function buildMetalness(size, rng, p) {
   if (p.emblem.enabled) {
     const cx = size * 0.5
     const cy = size * 0.5
-    const R = size * 0.16
+    const R = size * EMBLEM_RADIUS_FRAC
     mctx.fillStyle = 'rgb(200,200,200)'
     mctx.beginPath()
     mctx.arc(cx, cy, R, 0, Math.PI * 2)
@@ -688,8 +721,8 @@ function buildMetalness(size, rng, p) {
   }
 
   // Rust zones: lower metalness (oxide is non-metallic).
-  if (p.wear.enabled && p.wear.amount > 0.2) {
-    const rustCount = Math.round(4 + p.wear.amount * 20)
+  if (p.wear.enabled && p.wear.amount > RUST_THRESHOLD) {
+    const rustCount = Math.round(RUST_BASE + p.wear.amount * RUST_SPAN)
     for (let i = 0; i < rustCount; i++) {
       const cx = rng.range(0, size)
       const cy = rng.range(0, size)
@@ -734,19 +767,20 @@ function buildNormalMap(size, rng, p) {
   }
 
   // Panel line indentations. Uses the same derived RNG as the albedo's
-  // drawPanelLines (seed + 31337) so the jitter values — and therefore the
-  // groove positions — align exactly with the coloured panel lines.
+  // drawPanelLines (seed + PANEL_SEED_SALT) so the jitter values — and
+  // therefore the groove positions — align exactly with the coloured panel
+  // lines.
   if (p.panelLines.enabled) {
-    const plRng = createRng((p.seed + 31337) >>> 0)
-    const cells = 4 + Math.round(p.panelLines.weight * 14)
+    const plRng = createRng((p.seed + PANEL_SEED_SALT) >>> 0)
+    const cells = PANEL_BASE_CELLS + Math.round(p.panelLines.weight * PANEL_CELL_SPAN)
     const step = size / cells
     for (let i = 0; i < cells; i++) {
-      const x = i * step + plRng.range(-0.18, 0.18) * step
-      const y = i * step + plRng.range(-0.18, 0.18) * step
+      const x = i * step + plRng.range(-PANEL_JITTER, PANEL_JITTER) * step
+      const y = i * step + plRng.range(-PANEL_JITTER, PANEL_JITTER) * step
       normalLine(x, 0, x, size, p.panelLines.weight)
       normalLine(0, y, size, y, p.panelLines.weight)
-      // Rivet bumps along the seams (same 0.5 probability as the albedo).
-      if (plRng.chance(0.5)) {
+      // Rivet bumps along the seams (same probability as the albedo).
+      if (plRng.chance(RIVET_PROB)) {
         const ty = plRng.range(0, size)
         nctx.fillStyle = 'rgb(128,170,255)'
         nctx.beginPath()
@@ -764,8 +798,8 @@ function buildNormalMap(size, rng, p) {
   // bump positions align exactly with the coloured greebles. Only cx/cy are
   // used for the bump centre; the rest are consumed to keep the RNG in sync.
   if (p.greebles.enabled) {
-    const gRng = createRng((p.seed + 104729) >>> 0)
-    const count = Math.round(60 + p.greebles.density * 400)
+    const gRng = createRng((p.seed + GREEBLE_SEED_SALT) >>> 0)
+    const count = Math.round(GREEBLE_BASE + p.greebles.density * GREEBLE_SPAN)
     for (let i = 0; i < count; i++) {
       gRng.int(0, 4) // kind (consumed, not used)
       const cx = gRng.range(0, size)
@@ -796,7 +830,7 @@ function buildNormalMap(size, rng, p) {
   // Organic pattern relief: uses the same derived seed as the albedo so the
   // normal map aligns with the colour map.
   if (p.organic.enabled) {
-    const oRng = createRng((p.seed + 7919) >>> 0)
+    const oRng = createRng((p.seed + ORGANIC_SEED_SALT) >>> 0)
     if (p.organic.style === 'voronoi') {
       // Per-pixel: normal points away from the cell border (toward seed),
       // creating raised cell interiors with grooved borders.
@@ -897,12 +931,12 @@ function buildAO(size, rng, p) {
 
   // Panel joint darkening.
   if (p.panelLines.enabled) {
-    const cells = 4 + Math.round(p.panelLines.weight * 14)
+    const cells = PANEL_BASE_CELLS + Math.round(p.panelLines.weight * PANEL_CELL_SPAN)
     const step = size / cells
     const jointW = Math.max(2, size * 0.004)
     for (let i = 0; i < cells; i++) {
-      const x = i * step + rng.range(-0.18, 0.18) * step
-      const y = i * step + rng.range(-0.18, 0.18) * step
+      const x = i * step + rng.range(-PANEL_JITTER, PANEL_JITTER) * step
+      const y = i * step + rng.range(-PANEL_JITTER, PANEL_JITTER) * step
       // Soft dark band along vertical joint.
       const gv = actx.createLinearGradient(x - jointW, 0, x + jointW, 0)
       gv.addColorStop(0, 'rgba(255,255,255,0)')
@@ -922,8 +956,8 @@ function buildAO(size, rng, p) {
 
   // Greeble crevices (dark spots around machinery).
   if (p.greebles.enabled) {
-    const gRng = createRng((p.seed + 104729) >>> 0)
-    const count = Math.round(60 + p.greebles.density * 400)
+    const gRng = createRng((p.seed + GREEBLE_SEED_SALT) >>> 0)
+    const count = Math.round(GREEBLE_BASE + p.greebles.density * GREEBLE_SPAN)
     for (let i = 0; i < count; i++) {
       const cx = gRng.range(0, size)
       const cy = gRng.range(0, size)
@@ -1021,12 +1055,12 @@ export function generateTextures(params = {}) {
   const ctx = canvas.getContext('2d')
   drawBase(ctx, size, base)
   if (p.organic.enabled) {
-    const organicRng = createRng((p.seed + 7919) >>> 0)
+    const organicRng = createRng((p.seed + ORGANIC_SEED_SALT) >>> 0)
     drawOrganic(ctx, size, organicRng, base, secondary, glow, p.organic.style)
   }
   if (p.panelLines.enabled) drawPanelLines(ctx, size, p.seed, base, secondary, p.panelLines.weight)
   if (p.greebles.enabled) {
-    const greebleRng = createRng((p.seed + 104729) >>> 0)
+    const greebleRng = createRng((p.seed + GREEBLE_SEED_SALT) >>> 0)
     drawGreebles(ctx, size, greebleRng, base, secondary, accent, p.greebles.density)
   }
   if (p.wear.enabled) drawWear(ctx, size, rng, base, p.wear.amount)

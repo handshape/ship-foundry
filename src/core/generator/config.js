@@ -24,7 +24,7 @@
 //   { type: 'palette', default: [base, secondary, accent, glow] }
 //   { type: 'object',  children: { ... } }
 
-import { HULL_ARCHETYPES, HULL_SECTIONS } from './hull.js'
+import { HULL_ARCHETYPES, HULL_SECTIONS, DEFAULT_LENGTH, DEFAULT_BEAM, DEFAULT_HEIGHT } from './hull.js'
 import {
   BRIDGE_STYLES,
   WEAPON_STYLES,
@@ -38,6 +38,19 @@ import {
   HANGAR_POSITIONS,
 } from './modules.js'
 import { listAesthetics } from '../aesthetics/index.js'
+
+// --- shared constants --------------------------------------------------------
+// Default 4-slot palette [base, secondary, accent, glow]. The single source of
+// truth for the fallback colour set; textures and modules import this instead
+// of duplicating the array.
+export const DEFAULT_PALETTE = ['#8a94a6', '#5b6472', '#3a86c8', '#66d9ff']
+
+// Weighted candidate values for the nacelle `count` randomizer. Identical
+// across all 8 aesthetics + the schema default.
+export const NACELLE_COUNT_WEIGHTS = [2, 2, 2, 4, 4]
+
+// Default texture size (pixels). Must stay within the schema's num range.
+export const DEFAULT_TEXTURE_SIZE = 512
 
 const num = (min, max, def, int = false) => ({ type: 'number', min, max, default: def, int })
 // numW: like num, but `rand` holds an array of weighted candidate values for
@@ -58,9 +71,9 @@ export const SHIP_CONFIG_SCHEMA = {
     children: {
       archetype: choice(HULL_ARCHETYPES, 'blocky'),
       // Frigate-scale: length 20+ reads as a capital-ship silhouette, not a toy.
-      length: num(20, 150, 40),
-      beam: num(8, 60, 14),
-      height: num(4, 40, 8),
+      length: num(20, 150, DEFAULT_LENGTH),
+      beam: num(8, 60, DEFAULT_BEAM),
+      height: num(4, 40, DEFAULT_HEIGHT),
       crossSection: choice(HULL_SECTIONS, 'hex'),
       noseTaper: num(0, 1, 0.5),
       sternTaper: num(0, 1, 0.35),
@@ -113,7 +126,7 @@ export const SHIP_CONFIG_SCHEMA = {
           // The pod's BODY type: 'standard' (long tapered cylinder) or
           // 'crystal' (faceted hexagonal prism + pointed caps).
           type: choice(NACELLE_TYPES, 'standard'),
-          count: numW(0, 4, 2, true, [2, 2, 2, 4, 4]),
+          count: numW(0, 4, 2, true, NACELLE_COUNT_WEIGHTS),
           size: numW(0.5, 3, 1, false, [0.5, 0.6, 0.7, 0.8, 1.0, 1.4, 2.0, 3.0]),
           // How the nacelle's support strut sweeps along the travel axis (+Z):
           //   forward  -> strut slants from a hull root AFT of the pod, reaching
@@ -182,7 +195,7 @@ export const SHIP_CONFIG_SCHEMA = {
     type: 'object',
     children: {
       // [base, secondary, accent, glow] — 4 hex color strings.
-      palette: { type: 'palette', default: ['#8a94a6', '#5b6472', '#3a86c8', '#66d9ff'] },
+      palette: { type: 'palette', default: DEFAULT_PALETTE },
       panelLines: {
         type: 'object',
         children: { enabled: flag(true), weight: num(0, 1, 0.6) },
@@ -224,7 +237,7 @@ export const SHIP_CONFIG_SCHEMA = {
         type: 'object',
         children: { enabled: flag(true), density: num(0, 1, 0.4) },
       },
-      size: num(64, 2048, 512, true),
+      size: num(64, 2048, DEFAULT_TEXTURE_SIZE, true),
     },
   },
 }
@@ -323,12 +336,19 @@ function rgbToHex(r, g, b) {
   return `#${byte(r)}${byte(g)}${byte(b)}`
 }
 
-// Parse a hex colour to [r, g, b] (0..255).
+// Parse a hex colour to [r, g, b] (0..255). Falls back to the default base
+// colour (DEFAULT_PALETTE[0]) when the input is unparseable.
+const DEFAULT_BASE_RGB = (() => {
+  const h = DEFAULT_PALETTE[0].replace('#', '')
+  const n = parseInt(h, 16)
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
+})()
+
 function hexToRgbArr(hex) {
   const h = String(hex || '').replace('#', '').trim()
   const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h.padEnd(6, '0')
   const n = parseInt(full.slice(0, 6), 16)
-  if (!Number.isFinite(n)) return [138, 148, 166]
+  if (!Number.isFinite(n)) return [...DEFAULT_BASE_RGB]
   return [(n >> 16) & 255, (n >> 8) & 255, n & 255]
 }
 

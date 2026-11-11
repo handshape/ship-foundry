@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { createRng } from './rng.js'
-import { varyModuleTone } from './config.js'
-import { TWIN_TUBE_OFFSET, TWIN_CROSSBEAM_H } from './hull.js'
+import { varyModuleTone, DEFAULT_PALETTE } from './config.js'
+import { TWIN_TUBE_OFFSET, TWIN_TUBE_BEAM, TWIN_CROSSBEAM_H, DEFAULT_LENGTH, DEFAULT_BEAM, DEFAULT_HEIGHT } from './hull.js'
 
 // SUPERSTRUCTURE & MODULES (SP-05 owns the full catalog).
 //
@@ -29,6 +29,30 @@ const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
 const lerp = (a, b, t) => a + (b - a) * t
 const PI2 = Math.PI * 2
 
+// --- module tuning constants -------------------------------------------------
+// Pod taper ratio (the pod's aft end is narrower than its fore end by this
+// fraction). Used by the standard + crystal pod builders.
+const POD_TAPER = 0.92
+
+// Weapon mount embed: how far the weapon base is sunk into the hull surface so
+// it seats flush rather than floating.
+const WEAPON_EMBED = 0.18
+
+// Fit-guard embed: the floor + fraction used by bridge, commandSpike,
+// sensorMast, and antenna to keep modules from clipping through the hull.
+const EMBED_FLOOR = 0.1
+const EMBED_FRAC = 0.2
+
+// Aft pod radius fraction (× min(beam, height) × size).
+const AFT_POD_RADIUS_FRAC = 0.2
+
+// Insect hull surface boost: the bin extrema under-sample the ellipsoid bulges,
+// so the actual surface is ~11% larger than the single-ellipse formula.
+const INSECT_SURFACE_BOOST = 1.11
+
+// Nacelle pair-RNG seed multiplier (per-pair derived seed).
+const PAIR_SEED_MULT = 7919
+
 function defaultMaterial() {
   return new THREE.MeshStandardMaterial({ color: 0x9aa7b8, metalness: 0.5, roughness: 0.6 })
 }
@@ -39,7 +63,7 @@ function defaultMaterial() {
 // `glowColor` is a hex string (palette[3]) or a number; null/undefined falls
 // back to the pre-redesign cyan.
 function makeGlowMaterial(glowColor) {
-  const emissive = glowColor === null || glowColor === undefined ? 0x36c8ff : glowColor
+  const emissive = glowColor === null || glowColor === undefined ? parseInt(DEFAULT_PALETTE[3].slice(1), 16) : glowColor
   return new THREE.MeshStandardMaterial({
     color: 0x0a1420,
     emissive,
@@ -394,7 +418,7 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
   const starboard = resolveAnchor(hullInfo.anchors, 'starboard', new THREE.Vector3(1, 0, 0))
   const fore = resolveAnchor(hullInfo.anchors, 'fore', new THREE.Vector3(0, 0, 0))
   const aft = resolveAnchor(hullInfo.anchors, 'aft', new THREE.Vector3(0, 0, 0))
-  const halfLen = (hullInfo.length ?? 40) / 2
+  const halfLen = (hullInfo.length ?? DEFAULT_LENGTH) / 2
 
   // Sample the hull meshes' vertices into z-bins (one bin per 1% of length).
   // The hull group is added to the ship at identity, so its world positions are
@@ -499,8 +523,8 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
   // with small sterns.
   function girthAt(z) {
     const b0 = binIndex(z)
-    const halfBeam = (hullInfo.beam ?? 14) / 2
-    const halfHeight = (hullInfo.height ?? 8) / 2
+    const halfBeam = (hullInfo.beam ?? DEFAULT_BEAM) / 2
+    const halfHeight = (hullInfo.height ?? DEFAULT_HEIGHT) / 2
     if (!hasGeometry) return Math.min(halfBeam, halfHeight) * 0.1
     const halfX = Math.max(
       Math.abs(interp(b0, 'maxX', halfBeam)),
@@ -529,7 +553,7 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
       if (b < 0 || b >= NBINS || bins[b].count === 0) continue
       best = Math.max(best, Math.max(Math.abs(bins[b].maxX), Math.abs(bins[b].minX)))
     }
-    const halfBeam = (hullInfo.beam ?? 14) / 2
+    const halfBeam = (hullInfo.beam ?? DEFAULT_BEAM) / 2
     return Math.max(hasGeometry ? best : 0, halfBeam * 0.5)
   }
 
@@ -588,8 +612,8 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
     const b0 = binIndex(z)
     const cosA = Math.cos(angle)
     const sinA = Math.sin(angle)
-    const halfBeam = (hullInfo.beam ?? 14) / 2
-    const halfHeight = (hullInfo.height ?? 8) / 2
+    const halfBeam = (hullInfo.beam ?? DEFAULT_BEAM) / 2
+    const halfHeight = (hullInfo.height ?? DEFAULT_HEIGHT) / 2
     if (!hasGeometry) return Math.min(halfBeam, halfHeight) * 0.1
     // Interpolated half-extents at this Z (linear between surrounding rings).
     const halfX = Math.max(
@@ -608,17 +632,16 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
     const isTwin = hullInfo.archetype === 'twin'
     if (isTwin) {
       // For a two-tube section, the tube on the pod's side (sign of cosA) is
-      // approximately a circle of radius tubeR centered at (tubeCx, 0), where
-      // tubeCx ≈ 3*halfX/4 and tubeR ≈ halfX/4 (the tube spans [halfX/2, halfX]
-      // in X, centered at 3*halfX/4 with radius halfX/4). The pod at angle
-      // `angle` in the X-Y plane has coordinates (cosA*r, sinA*r). For the pod
-      // to be on the tube's surface:
-      //   (cosA*r - tubeCx)² + (sinA*r)² = tubeR²
-      // Expanding: r² - 2* tubeCx * cosA * r + tubeCx² - tubeR² = 0
-      // Solving the quadratic: r = tubeCx*cosA ± sqrt((tubeCx*cosA)² - tubeCx² + tubeR²)
-      // We take the larger root (the outer surface).
-      const tubeCx = halfX * 0.75
-      const tubeR = halfX * 0.25
+      // approximately a circle of radius tubeR centered at (tubeCx, 0). The
+      // tube center is at TWIN_TUBE_OFFSET × beam from the centreline and the
+      // tube beam is TWIN_TUBE_BEAM × beam, so (in units of halfX ≈ beam/2):
+      //   tubeCx = (TWIN_TUBE_OFFSET × beam) / (2 × halfX) × halfX
+      //          = TWIN_TUBE_OFFSET × beam / 2  (when halfX ≈ beam/2)
+      //   tubeR  = (TWIN_TUBE_BEAM × beam) / 2
+      // Using the actual geometry constants so the query matches the built hull.
+      const beam = hullInfo.beam ?? DEFAULT_BEAM
+      const tubeCx = (TWIN_TUBE_OFFSET * beam) / 2
+      const tubeR = (TWIN_TUBE_BEAM * beam) / 2
       const a = cosA
       const b = -2 * tubeCx * a
       const c = tubeCx * tubeCx - tubeR * tubeR
@@ -645,8 +668,8 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
     // capture the max |x| and |y| at a Z, but the ellipsoids' bulges mean the
     // actual surface can be slightly larger than the single-ellipse formula
     // predicts (the bulge peaks between the bin's sample points). A small boost
-    // (5%) keeps the pod outboard of the hull's actual surface.
-    if (hullInfo.archetype === 'insect') r *= 1.11
+    // (11%) keeps the pod outboard of the hull's actual surface.
+    if (hullInfo.archetype === 'insect') r *= INSECT_SURFACE_BOOST
     // Small floor guards against a degenerate zero (e.g. a perfectly flat stern
     // cap with no cross-section at the exact Z). Does not push the pod
     // outboard of the real hull.
@@ -702,7 +725,7 @@ function buildBridge(rng, ctx) {
   // embedding is a fraction of the module's own height so the base penetrates
   // the hull by a meaningful depth (guaranteed contact even if the query is
   // slightly off).
-  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const baseY = surface.surfaceAt('top', z) - Math.max(EMBED_FLOOR, h * EMBED_FRAC)
   const glass = glassMaterial(glowColor)
   const base = { mat, glowMat, glass, hull, s, w, h, d, z, topY: baseY, fore }
 
@@ -1143,7 +1166,7 @@ function buildCommandSpike(rng, ctx) {
   const z = lerp(0, fore.z, t)
   // FIT GUARD: the spike's base (mast bottom) embeds into the real deck height
   // by a fraction of its own height (guaranteed contact).
-  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const baseY = surface.surfaceAt('top', z) - Math.max(EMBED_FLOOR, h * EMBED_FRAC)
   const base = { mat, glowMat, hull, s, h, z, topY: baseY }
 
   let g
@@ -1271,7 +1294,7 @@ function buildNacelleTail(group, tail, x, y, z, r, len, mat, glowMat) {
   switch (tail) {
     case 'point': {
       // A tapered cone to a sharp point, narrowing aft to a needle-like exhaust tip.
-      const cone = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r * 0.04, len * 0.22, 14), mat)
+      const cone = new THREE.Mesh(new THREE.CylinderGeometry(r * POD_TAPER, r * 0.04, len * 0.22, 14), mat)
       cone.name = 'nacelleTailPoint'
       cone.rotation.x = Math.PI / 2 // local +Y -> world +Z; the narrow end (radius 0.04) faces aft (-Z)
       cone.position.set(x, y, z - len * 0.11)
@@ -1326,7 +1349,7 @@ function buildNacelleTail(group, tail, x, y, z, r, len, mat, glowMat) {
       // A flared bell/cone that widens aft (a nozzle-like exhaust): the pod tapers
       // into a cone that flares out to a wider rim at the very aft end, with a
       // glowing inner disc.
-      const flare = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r * 1.25, len * 0.18, 14, 1, true), mat)
+      const flare = new THREE.Mesh(new THREE.CylinderGeometry(r * POD_TAPER, r * 1.25, len * 0.18, 14, 1, true), mat)
       flare.name = 'nacelleTailFlare'
       flare.rotation.x = Math.PI / 2 // local +Y -> world +Z; the wider end (radius 1.25) faces aft
       flare.position.set(x, y, z - len * 0.09)
@@ -1375,7 +1398,7 @@ function buildNacelleTail(group, tail, x, y, z, r, len, mat, glowMat) {
       // A glowing hemisphere at the aft end (mirrors the fore dome), a bright
       // exhaust cap.
       const dome = new THREE.Mesh(
-        new THREE.SphereGeometry(r * 0.92, 14, 10, 0, PI2, 0, Math.PI * 0.5),
+        new THREE.SphereGeometry(r * POD_TAPER, 14, 10, 0, PI2, 0, Math.PI * 0.5),
         glowMat
       )
       dome.name = 'nacelleTailDome'
@@ -1411,7 +1434,7 @@ function buildNacelle(rng, ctx) {
   // Per-pair sub-RNG: keyed on (shipSeed + instance index) so each pair (mirror
   // twins share the same i) gets consistent per-pair variation, while different
   // instances can differ. Keeps the mirror symmetric (same i → same values).
-  const pairRng = createRng((ctx.params._seed ?? 0) + i * 7919)
+  const pairRng = createRng((ctx.params._seed ?? 0) + i * PAIR_SEED_MULT)
 
   // --- Placement (z, side offset, pod dimensions) depends on the mount --------
   let r, len, z, sideExtent, cy, hasStrut, hasNose
@@ -1451,7 +1474,7 @@ function buildNacelle(rng, ctx) {
     // face is inside the hull.
     const sternZ = surface.surfaceAt('aft', aft.z)
     const sternGirth = surface.girthAt(sternZ)
-    const requestedRadius = Math.min(hull.beam, hull.height) * 0.2 * s
+    const requestedRadius = Math.min(hull.beam, hull.height) * AFT_POD_RADIUS_FRAC * s
     const perSide = Math.max(1, ctx.n ?? n)
     r = aftPodRadius(sternGirth, perSide, requestedRadius)
     len = hull.length * 0.30 * s
@@ -1595,7 +1618,7 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
   }
 
   // Standard: long tapered cylinder + domed fore nose (if hasNose).
-  const pod = new THREE.Mesh(new THREE.CylinderGeometry(r * 0.92, r, len, 14), mat)
+  const pod = new THREE.Mesh(new THREE.CylinderGeometry(r * POD_TAPER, r, len, 14), mat)
   pod.name = 'nacellePod'
   pod.rotation.x = Math.PI / 2
   pod.position.copy(center)
@@ -1607,7 +1630,7 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
     // in the stern) always use the non-luminous mat for the dome.
     const domeMat = forceMat ? mat : (i % 2 === 0 ? mat : glowMat)
     const dome = new THREE.Mesh(
-      new THREE.SphereGeometry(r * 0.92, 14, 10, 0, PI2, 0, Math.PI * 0.5),
+      new THREE.SphereGeometry(r * POD_TAPER, 14, 10, 0, PI2, 0, Math.PI * 0.5),
       domeMat
     )
     dome.name = 'nacelleDome'
@@ -1711,7 +1734,7 @@ function buildWeapon(rng, ctx) {
   // saturation, so the weapons read as a darker, richer version of the ship's
   // accent colour. Metalness is moderate (0.35): the scene has no environment
   // map, so a highly metallic surface would reflect nothing and render black.
-  const accentHex = accent ?? color ?? '#5b6472'
+  const accentHex = accent ?? color ?? DEFAULT_PALETTE[1]
   const weaponBaseColor = new THREE.Color(accentHex)
   const weaponMat = new THREE.MeshStandardMaterial({
     color: weaponBaseColor,
@@ -1798,10 +1821,10 @@ function buildWeapon(rng, ctx) {
       const crossbeamBottom = -(hull.height * TWIN_CROSSBEAM_H) / 2
       if (n === 1) {
         mountX = 0
-        mountY = crossbeamBottom - R * 0.18
+        mountY = crossbeamBottom - R * WEAPON_EMBED
       } else {
         mountX = (i % 2 === 0 ? -1 : 1) * tubeOffset
-        mountY = tubeBottom - R * 0.18
+        mountY = tubeBottom - R * WEAPON_EMBED
       }
       barrelY = mountY + dirY * R * 0.2
       surfaceNormal = new THREE.Vector3(0, 1, 0)
@@ -1811,7 +1834,7 @@ function buildWeapon(rng, ctx) {
       const bottomExt = surface.surfaceAt('bottom', z)
       const keelY = bottom?.y ?? -hull.height * 0.5
       mountX = 0
-      mountY = Math.min(bottomExt, keelY) - R * 0.18
+      mountY = Math.min(bottomExt, keelY) - R * WEAPON_EMBED
       barrelY = mountY + dirY * R * 0.2
       surfaceNormal = new THREE.Vector3(0, 1, 0)
     }
@@ -1830,10 +1853,10 @@ function buildWeapon(rng, ctx) {
       const crossbeamTop = (hull.height * TWIN_CROSSBEAM_H) / 2
       if (n === 1) {
         mountX = 0
-        mountY = crossbeamTop + R * 0.18
+        mountY = crossbeamTop + R * WEAPON_EMBED
       } else {
         mountX = (i % 2 === 0 ? -1 : 1) * tubeOffset
-        mountY = tubeTop + R * 0.18
+        mountY = tubeTop + R * WEAPON_EMBED
       }
       barrelY = mountY + dirY * R * 0.25
       // Y axis along +Y (no rotation needed — the weapon is already built with
@@ -1846,7 +1869,7 @@ function buildWeapon(rng, ctx) {
       // on (or just inside) the deck rather than floating in the air above it.
       const angle = (i / n) * PI2
       const surfR = surface.surfaceRadiusAt(angle, z)
-      const embed = R * 0.18
+      const embed = R * WEAPON_EMBED
       const rr = Math.max(surfR - embed, surfR * 0.5)
       mountX = Math.cos(angle) * rr
       mountY = Math.sin(angle) * rr
@@ -2435,7 +2458,7 @@ function buildSensorMast(rng, ctx) {
   const x = 0
   // FIT GUARD: seat the mast base on the real deck height at this z, embedding
   // by a fraction of its own height (guaranteed contact).
-  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const baseY = surface.surfaceAt('top', z) - Math.max(EMBED_FLOOR, h * EMBED_FRAC)
   const base = { mat, glowMat, hull, h, x, z, topY: baseY }
 
   let g
@@ -2545,7 +2568,7 @@ function buildAntenna(rng, ctx) {
   const x = 0
   // FIT GUARD: seat the whip base on the real deck height at this z, embedding
   // by a fraction of its own height (guaranteed contact).
-  const baseY = surface.surfaceAt('top', z) - Math.max(0.1, h * 0.2)
+  const baseY = surface.surfaceAt('top', z) - Math.max(EMBED_FLOOR, h * EMBED_FRAC)
   const base = { mat, glowMat, hull, h, x, z, topY: baseY }
 
   let g
@@ -3066,9 +3089,9 @@ export function generateModules(
   group.name = 'modules'
 
   const rng = createRng(params._seed ?? 0)
-  const beam = hullInfo.beam ?? 14
-  const height = hullInfo.height ?? 8
-  const length = hullInfo.length ?? 40
+  const beam = hullInfo.beam ?? DEFAULT_BEAM
+  const height = hullInfo.height ?? DEFAULT_HEIGHT
+  const length = hullInfo.length ?? DEFAULT_LENGTH
   const hull = {
     beam,
     height,
@@ -3171,7 +3194,7 @@ export function generateModules(
         waistSingle = count > 0
       } else if (p.mount === 'aft') {
         const sternGirth = surface.girthAt(aft.z)
-        const requestedRadius = Math.min(hull.beam, hull.height) * 0.2 * (p.size ?? 1)
+        const requestedRadius = Math.min(hull.beam, hull.height) * AFT_POD_RADIUS_FRAC * (p.size ?? 1)
         // Cap the per-side count (n) at 8 AND at the count that fits the stern
         // girth at the requested radius (the radius is clamped to the same fit in
         // buildNacelle), so the 2n-pod bank never overlaps.

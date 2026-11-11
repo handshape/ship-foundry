@@ -1,5 +1,11 @@
 import * as THREE from 'three'
 
+// Default hull dimensions (the single source of truth, consumed by config.js
+// and modules.js as fallbacks).
+export const DEFAULT_LENGTH = 40
+export const DEFAULT_BEAM = 14
+export const DEFAULT_HEIGHT = 8
+
 // HULL GEOMETRY (SP-04) — hull-body system.
 //
 // Contract (unchanged — the spine, modules and harnesses rely on it):
@@ -40,6 +46,12 @@ export const HULL_SECTIONS = ['hex', 'ellipse', 'diamond', 'octagon']
 
 const MIN_SCALE = 0.03
 const MIN_PROFILE_PTS = 8
+
+// Nose taper tuning (shared by the lofted body and the nose dome cap).
+const NOSE_TIP_RADIUS = 0.22 // full-nose tip radius (fraction of girth)
+const NOSE_TIP_MIN = 0.04 // floor so the tip never degenerates to zero
+const NOSE_TAPER_RINGS = 0.22 // fraction of stations in the nose taper region
+const STERN_TAPER_FACTOR = 0.55 // how much of sternTaper shrinks the stern ring
 
 // --- math helpers ------------------------------------------------------------
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
@@ -208,19 +220,18 @@ function buildLofted(archetype, params, profile, m, halfLen) {
   const cumU = [0]
   for (let i = 0; i < m; i++) cumU.push(cumU[i] + segLen[i] / totalLen)
 
-  const sternShrink = 1 - 0.55 * sternTaper
-  // Nose: instead of shrinking to a finite ring (1 - 0.55*noseTaper) and capping
-  // it flat — which reads as a snub/blunt nose — the last portion of the hull
-  // tapers toward a NEAR-POINT. The nose tip radius (fraction of full girth)
-  // shrinks with noseTaper: 0 = a full rounded nose to a point, 1 = a sharp
-  // needle. A small floor (NOSE_TIP_MIN) keeps it from degenerating to a true
-  // zero-radius point (which would collapse the cap fan and cause shading
-  // artifacts); the rounded nose cap below closes that small opening smoothly.
-  const NOSE_TIP_MIN = 0.04
-  const noseTipR = lerp(0.22, NOSE_TIP_MIN, clamp(noseTaper, 0, 1))
+  const sternShrink = 1 - STERN_TAPER_FACTOR * sternTaper
+  // Nose: instead of shrinking to a finite ring (1 - STERN_TAPER_FACTOR*noseTaper)
+  // and capping it flat — which reads as a snub/blunt nose — the last portion
+  // of the hull tapers toward a NEAR-POINT. The nose tip radius (fraction of
+  // full girth) shrinks with noseTaper: 0 = a full rounded nose to a point,
+  // 1 = a sharp needle. A small floor (NOSE_TIP_MIN) keeps it from
+  // degenerating to a true zero-radius point; the rounded nose cap below
+  // closes that small opening smoothly.
+  const noseTipR = lerp(NOSE_TIP_RADIUS, NOSE_TIP_MIN, clamp(noseTaper, 0, 1))
   // The nose taper occupies the final NNOSE rings (the "cutoff" region). More
   // rings = a longer, smoother taper.
-  const nNose = Math.max(3, Math.round(stations * 0.22))
+  const nNose = Math.max(3, Math.round(stations * NOSE_TAPER_RINGS))
 
   for (let j = 0; j < ringCount; j++) {
     const s = j / stations
@@ -735,9 +746,9 @@ function buildAnchors(info, { topY, bottomY, foreZ, aftZ }) {
 // --- main --------------------------------------------------------------------
 
 export function generateHull(params = {}) {
-  const length = clamp(params.length ?? 40, 4, 500)
-  const beam = clamp(params.beam ?? 14, 2, 500)
-  const height = clamp(params.height ?? 8, 1, 500)
+  const length = clamp(params.length ?? DEFAULT_LENGTH, 4, 500)
+  const beam = clamp(params.beam ?? DEFAULT_BEAM, 2, 500)
+  const height = clamp(params.height ?? DEFAULT_HEIGHT, 1, 500)
   const crossSection = HULL_SECTIONS.includes(params.crossSection) ? params.crossSection : 'hex'
   const archetype = HULL_ARCHETYPES.includes(params.archetype) ? params.archetype : 'blocky'
   const stations = clamp(Math.round(params.stations ?? 12), 4, 64)
@@ -819,7 +830,7 @@ export function generateHull(params = {}) {
   // surface at x=0), not the tube extrema. The tubes are offset in X; modules
   // placed at the centreline need the crossbeam height.
   if (archetype === 'twin') {
-    const crossH = height * 0.14
+    const crossH = (height * TWIN_CROSSBEAM_H) / 2
     info.anchors.top.set(0, crossH + centerY, 0)
     info.anchors.bottom.set(0, -crossH + centerY, 0)
   }

@@ -148,15 +148,54 @@ src/
   `document.createElement('canvas')` with a Proxy 2D context), generate the same
   config+seed twice, and diff node names / world positions / material colors.
 
+## Shared constants
+
+Cross-file tuning values live in named constants so they stay in sync:
+
+| Constant | Defined in | Used in |
+|---|---|---|
+| `DEFAULT_LENGTH` / `DEFAULT_BEAM` / `DEFAULT_HEIGHT` | `hull.js` | `config.js` schema, `hull.js` fallbacks, `modules.js` fallbacks |
+| `DEFAULT_PALETTE` | `config.js` | `config.js` schema, `textures/index.js`, `modules.js` (glow + weapon fallback) |
+| `NACELLE_COUNT_WEIGHTS` | `config.js` | `config.js` schema (aesthetics use the literal to avoid the circular import) |
+| `DEFAULT_TEXTURE_SIZE` | `config.js` | `config.js` schema, `textures/index.js` normalizer |
+| `TWIN_TUBE_OFFSET` / `TWIN_TUBE_BEAM` / `TWIN_TUBE_HEIGHT` / `TWIN_CROSSBEAM_W` / `TWIN_CROSSBEAM_H` / `TWIN_CROSSBEAM_L` | `hull.js` | `hull.js` (anchor + geometry), `modules.js` (weapon/nacelle placement) |
+
+Texture tuning constants (`ORGANIC_SEED_SALT`, `PANEL_SEED_SALT`,
+`GREEBLE_SEED_SALT`, `PANEL_BASE_CELLS`, `PANEL_CELL_SPAN`, `PANEL_JITTER`,
+`RIVET_PROB`, `GREEBLE_BASE`, `GREEBLE_SPAN`, `EMBLEM_RADIUS_FRAC`,
+`LUCIDE_VIEWBOX`, `RUST_THRESHOLD`, `RUST_BASE`, `RUST_SPAN`) are local to
+`textures/index.js`.
+
+Module tuning constants (`POD_TAPER`, `WEAPON_EMBED`, `EMBED_FLOOR`,
+`EMBED_FRAC`, `AFT_POD_RADIUS_FRAC`, `INSECT_SURFACE_BOOST`, `PAIR_SEED_MULT`)
+are local to `modules.js`.
+
+Nose-taper constants (`NOSE_TIP_RADIUS`, `NOSE_TIP_MIN`, `NOSE_TAPER_RINGS`,
+`STERN_TAPER_FACTOR`) are local to `hull.js`.
+
+When adding a new tuning value that is used in 2+ places, extract it to a named
+constant. When a constant is shared across files, prefer defining it in the
+module that owns the geometry (e.g. `hull.js`) to avoid circular-import TDZ.
+
 ## Notes for the agent
 
 - **Circular imports** (pre-existing): `config.js` ↔ `modules.js` and
   `config.js` ↔ `aesthetics/index.js`. They work in the browser; in headless Node
   they can hit TDZ if imported in the wrong order — import `index.js` first.
+  Do NOT add new imports from `config.js` into `aesthetics/index.js` or
+  `modules.js` that are used at module top-level (e.g. in a const initializer),
+  as this will trigger TDZ. The `DEFAULT_PALETTE` import in `textures/index.js`
+  and `modules.js` is safe because those files are leaf modules (no cycle back
+  to `config.js` through top-level evaluation).
 - The `numW` helper in `config.js` is like `num` but with a weighted `rand` array
-  for the schema-driven randomizer (e.g. nacelle `count` weights `[2,2,2,4,4]`).
+  for the schema-driven randomizer (e.g. nacelle `count` weights use
+  `NACELLE_COUNT_WEIGHTS`).
 - `generateHull` archetypes each use genuinely different base geometries — do
   not collapse them into one lofted tube.
+- Twin-hull geometry is defined by the `TWIN_*` constants in `hull.js`. The
+  surface query in `modules.js` (`surfaceRadiusAt`) uses the same constants so
+  the pod placement matches the built hull. The twin top/bottom anchors point
+  to the crossbeam (not the tube extrema) via `TWIN_CROSSBEAM_H`.
 - Aft nacelle engines are **embedded in the stern** (front face inside the hull,
   back face outside); pylon and waist nacelles are outboard. See
   `buildNacelle` in `src/core/generator/modules.js`.
