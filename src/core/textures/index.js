@@ -215,6 +215,10 @@ function normalizeParams(params = {}) {
       enabled: params.organic?.enabled === true,
       style: params.organic?.style || 'voronoi',
     },
+    windows: {
+      enabled: params.windows?.enabled !== false,
+      density: clamp01(params.windows?.density, 0.4),
+    },
     size: clampInt(params.size, 64, 4096, 1024),
     seed: params.seed ?? 0,
   }
@@ -932,6 +936,64 @@ function buildAO(size, rng, p) {
   return canvas
 }
 
+// Emissive map: mostly black (no glow) with bright spots at window locations.
+// The material's emissive colour (the palette's glow channel) is multiplied by
+// this map, so only the windows glow — the rest of the hull stays dark.
+//
+// Windows are small dots or short lines scattered across the texture. Their
+// density is modulated by UV.u (girth fraction): the hull's vertical surfaces
+// (port/starboard sides) map to u ≈ 0.25 and u ≈ 0.75, so windows are denser
+// there. The horizontal surfaces (top/bottom) at u ≈ 0 and u ≈ 0.5 get fewer.
+function buildEmissiveMap(size, rng, p) {
+  const canvas = makeCanvas(size)
+  const ctx = canvas.getContext('2d')
+  // Black = no emissive.
+  ctx.fillStyle = '#000000'
+  ctx.fillRect(0, 0, size, size)
+  if (!p.windows.enabled) return canvas
+
+  const density = p.windows.density
+  const count = Math.round(30 + density * 200)
+  // Window brightness (0..1) — how bright the glow is at each window.
+  const brightness = 0.5 + density * 0.4
+
+  // Density bias by UV.v (girth, after the UV swap): peaks at v=0 and v=0.5
+  // (the hull's vertical sides — the cross-section profiles start at the
+  // starboard side, angle 0°, and go CCW, so the sides are at v=0 and v=0.5),
+  // troughs at v≈0.25 and v≈0.75 (top/bottom). cos(4πv) peaks at 0 and 0.5.
+  const sideBias = (v) => 0.25 + 0.75 * (0.5 + 0.5 * Math.cos(4 * Math.PI * v))
+
+  for (let i = 0; i < count; i++) {
+    const u = rng.range(0.02, 0.98) // u = length (0=stern, 1=nose)
+    const v = rng.range(0.02, 0.98) // v = girth (0..1 around cross-section)
+    // Accept/reject based on side bias: windows are more likely on the sides.
+    if (rng.range(0, 1) > sideBias(v)) continue
+
+    const cx = u * size
+    const cy = (1 - v) * size // v=0 is one side of the girth, v=1 is the other
+    const isLine = rng.chance(0.35)
+
+    if (isLine) {
+      // Short horizontal line (a row of portholes running fore-to-aft,
+      // i.e. along the hull's length). After the UV swap, u (length) is the
+      // horizontal axis, so a fore-aft line is horizontal in the canvas.
+      const len = rng.range(size * 0.015, size * 0.04)
+      const h = Math.max(1.5, size * 0.004)
+      ctx.fillStyle = `rgba(255,255,255,${brightness})`
+      ctx.fillRect(cx - len / 2, cy - h / 2, len, h)
+    } else {
+      // Small dot (a single porthole).
+      const rad = Math.max(1, size * 0.003)
+      ctx.fillStyle = `rgba(255,255,255,${brightness})`
+      ctx.beginPath()
+      ctx.arc(cx, cy, rad, 0, Math.PI * 2)
+      ctx.fill()
+    }
+  }
+
+  return canvas
+}
+
 // --- public API ---------------------------------------------------------------
 
 export function generateTextures(params = {}) {
@@ -963,8 +1025,9 @@ export function generateTextures(params = {}) {
   const metalnessMap = toTexture(buildMetalness(size, rng, p), false)
   const normalMap = toTexture(buildNormalMap(size, rng, p), false)
   const aoMap = toTexture(buildAO(size, rng, p), false)
+  const emissiveMap = toTexture(buildEmissiveMap(size, rng, p), false)
 
-  return { map, roughnessMap, metalnessMap, normalMap, aoMap }
+  return { map, roughnessMap, metalnessMap, normalMap, aoMap, emissiveMap }
 }
 
 // Build a ready MeshPhysicalMaterial from generated texture maps.
@@ -986,7 +1049,14 @@ export function createShipMaterial(textures = {}, { emissive, clearcoat = 0.4 } 
     // Clearcoat: a glossy painted layer over the base surface.
     clearcoat,
     clearcoatRoughness: 0.25,
-    ...(emissiveColor !== null ? { emissive: new THREE.Color(emissiveColor), emissiveIntensity: 0 } : {}),
   })
+  // Emissive: the glow colour (palette[3]) is multiplied by the emissive map,
+  // so only the windows (bright spots in the map) glow — the rest of the hull
+  // stays dark. Without the map the emissive would wash the whole hull.
+  if (emissiveColor !== null) {
+    material.emissive = new THREE.Color(emissiveColor)
+    material.emissiveMap = textures.emissiveMap ?? null
+    material.emissiveIntensity = 1.0
+  }
   return material
 }

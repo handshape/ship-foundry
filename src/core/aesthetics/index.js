@@ -107,7 +107,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: true, count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.6), count: N(1, 3, true) }),
-        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS) }),
+        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(['bay', 'bay', 'dock']) }),
       },
       texture: {
         palette: P([
@@ -199,7 +199,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.5), count: N(2, 6, true), size: N(0.7, 1.3), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.6), count: C([1, 2]), height: N(3, 7), style: 'ring' }),
         antenna: M({ enabled: B(0.5), count: N(2, 4, true) }),
-        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS) }),
+        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(['pod', 'pod', 'bay']) }),
       },
       texture: {
         palette: P([
@@ -246,7 +246,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.5), count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 4, true) }),
-        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS) }),
+        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(['pod', 'dock', 'bay']) }),
       },
       texture: {
         palette: P([
@@ -292,7 +292,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: true, count: N(2, 6, true), size: N(1.0, 1.8), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.7), count: C([2, 4]), height: N(6, 10) }),
         antenna: M({ enabled: B(0.6), count: N(3, 6, true) }),
-        hangar: M({ enabled: B(0.4), count: 1, position: C(HANGAR_POSITIONS) }),
+        hangar: M({ enabled: B(0.4), count: 1, position: C(HANGAR_POSITIONS), style: C(['dock', 'dock', 'bay']) }),
       },
       texture: {
         palette: P([
@@ -384,7 +384,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.4), count: N(1, 4, true), size: N(0.7, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 5, true) }),
-        hangar: M({ enabled: B(0.85), count: 1, position: C(HANGAR_POSITIONS) }),
+        hangar: M({ enabled: B(0.85), count: 1, position: C(HANGAR_POSITIONS), style: C(['bay', 'bay', 'dock']) }),
       },
       texture: {
         palette: P([
@@ -429,7 +429,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.6), count: N(0, 4, true), size: N(0.6, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(2, 5) }),
         antenna: M({ enabled: B(0.5), count: N(0, 3, true) }),
-        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS) }),
+        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(['bay', 'bay', 'pod', 'dock']) }),
       },
       texture: {
         palette: P([

@@ -34,33 +34,35 @@ export function generateShip(config = {}, seed) {
   // Hull geometry + placement info (dimensions + surface anchors).
   const hull = generateHull(cfg.hull)
 
-  // Procedural surface maps -> the single PBR material shared by hull + modules.
-  // `color` is a convenience base color (palette[0]) for the flat-color
-  // placeholder texture; SP-06 reads `palette` directly. Emissive glow is
-  // derived from the palette's glow channel (palette[3]) so organic/retro
-  // aesthetics get their bioluminescent/chrome glow.
+  // Procedural surface maps -> PBR materials. Two materials are created:
+  //   - hullMaterial:   includes the emissive map (windows glow) — hull only.
+  //   - moduleMaterial: no emissive map — nacelles, bridges, weapons, etc.
+  // Both share the same texture maps (albedo, roughness, metalness, normal, AO)
+  // so the surface detail is identical; only the emissive differs.
   const textures = generateTextures({ ...cfg.texture, color: cfg.texture.palette?.[0] })
-  const material = createShipMaterial(textures, { emissive: cfg.texture.palette?.[3] ?? null })
+  const glowColor = cfg.texture.palette?.[3] ?? null
+  const hullMaterial = createShipMaterial(textures, { emissive: glowColor })
+  const moduleMaterial = createShipMaterial(textures, { emissive: null })
 
-  // Modules in hull-local space, sharing the material. The hull group is passed
-  // so the fit guard can query the hull's real surface (not the envelope) and
-  // seat every module base on it; the hull base colour is passed so each module
-  // type gets a mildly varied tone (same family, subtle hue/sat/brightness).
-  // Backward compatible: if a caller omits them, the guard falls back to
-  // anchor/envelope estimates and modules use the shared material.
+  // Modules in hull-local space, using the windowless material. The hull group
+  // is passed so the fit guard can query the hull's real surface (not the
+  // envelope) and seat every module base on it; the hull base colour is passed
+  // so each module type gets a mildly varied tone (same family, subtle
+  // hue/sat/brightness). Backward compatible: if a caller omits them, the
+  // guard falls back to anchor/envelope estimates.
   const moduleGroup = generateModules(cfg.modules, hull.info, {
-    material,
+    material: moduleMaterial,
     hullGroup: hull.group,
     color: cfg.texture.palette?.[0] ?? null,
-    glowColor: cfg.texture.palette?.[3] ?? null,
+    glowColor,
     accent: cfg.texture.palette?.[2] ?? null,
   })
 
   // The hull is a Group of one or more body meshes (lofted, disc, wedge,
-  // segmented, or a composite of tubes + crossbeam). Assign the shared texture
-  // material to every hull mesh so the whole body is textured consistently.
+  // segmented, or a composite of tubes + crossbeam). Assign the hull material
+  // (with the window emissive map) to every hull mesh.
   hull.group.traverse((o) => {
-    if (o.isMesh) o.material = material
+    if (o.isMesh) o.material = hullMaterial
   })
   hull.group.name = 'hull'
 

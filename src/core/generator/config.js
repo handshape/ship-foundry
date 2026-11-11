@@ -220,6 +220,10 @@ export const SHIP_CONFIG_SCHEMA = {
           ),
         },
       },
+      windows: {
+        type: 'object',
+        children: { enabled: flag(true), density: num(0, 1, 0.4) },
+      },
       size: num(64, 2048, 512, true),
     },
   },

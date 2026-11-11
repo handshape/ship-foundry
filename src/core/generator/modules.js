@@ -1721,7 +1721,13 @@ function buildWeapon(rng, ctx) {
   const t = ctx.t
   // `nose` mounts at the very tip of the hull (a fixed fore position) rather than
   // spreading fore/aft with `t` — the nose is a single point, not a line.
-  const z = position === 'nose' ? fore.z * 0.94 : lerp(0, fore.z, t * 0.8)
+  // `belly` on a disc: the disc's belly is a single point at the center (z=0),
+  // not a line along the length. Force z=0 so the weapon mounts at the disc's
+  // centre rather than 40% toward the nose.
+  const isDiscBelly = position === 'belly' && isDisc
+  const z = position === 'nose' ? fore.z * 0.94
+    : isDiscBelly ? 0
+    : lerp(0, fore.z, t * 0.8)
   // Halved from 0.6 -> 0.3 so weapons read as compact gun emplacements, not
   // bulky blocks. The len factor is halved proportionally (0.55 -> 0.275).
   const R = Math.min(hull.beam, hull.height) * 0.3 * s
@@ -2593,9 +2599,9 @@ function buildHangar(rng, ctx) {
   const i = ctx.i
   const side = n > 1 ? (i % 2 === 0 ? -1 : 1) : 1
 
-  // Reduced vertical size: the hangar is flatter than before (0.42 vs 0.7 of
-  // hull height) so it reads as a shallow cavity rather than a tall box.
-  const w = hull.beam * 0.42
+  // Shallow cavity: the hangar protrudes only slightly from the hull surface
+  // (0.25 of beam) so it reads as a recessed bay rather than a bulky box.
+  const w = hull.beam * 0.25
   const h = hull.height * 0.42
   const d = hull.length * 0.18
 

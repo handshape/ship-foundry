@@ -252,8 +252,8 @@ function buildLofted(archetype, params, profile, m, halfLen) {
       positions[idx] = p.x * beam * finalSx
       positions[idx + 1] = p.y * height * finalSy + centerY
       positions[idx + 2] = z
-      uvs[(j * m + i) * 2] = cumU[i]
-      uvs[(j * m + i) * 2 + 1] = s
+      uvs[(j * m + i) * 2] = s
+      uvs[(j * m + i) * 2 + 1] = cumU[i]
     }
   }
 
@@ -329,10 +329,10 @@ function buildLofted(archetype, params, profile, m, halfLen) {
   uvArr.set(uvs)
   for (let i = 0; i < m; i++) {
     posArr.set(domeMid[i], (domeMidBase + i) * 3)
-    uvArr.set([cumU[i], 1], (domeMidBase + i) * 2)
+    uvArr.set([1, cumU[i]], (domeMidBase + i) * 2)
   }
   posArr.set(apex, domeApex * 3)
-  uvArr.set([0.5, 1], domeApex * 2)
+  uvArr.set([1, 0.5], domeApex * 2)
   // Stern center (flat fan cap).
   let sx2 = 0
   let sy2 = 0
@@ -347,7 +347,7 @@ function buildLofted(archetype, params, profile, m, halfLen) {
   sy2 /= m
   sz2 /= m
   posArr.set([sx2, sy2, sz2], sternCenter * 3)
-  uvArr.set([0.5, 0], sternCenter * 2)
+  uvArr.set([0, 0.5], sternCenter * 2)
 
   // Nose dome: band 1 = nose ring -> dome mid ring (quads), band 2 = dome mid
   // ring -> apex (triangles). Profile is CCW as seen from +Z; winding is
@@ -490,8 +490,8 @@ function buildWedge(params, profile, m, halfLen) {
       positions[idx] = p.x * beam * sx
       positions[idx + 1] = p.y * height * sy + centerY
       positions[idx + 2] = z
-      uvs[(j * m + i) * 2] = (i / m)
-      uvs[(j * m + i) * 2 + 1] = s
+      uvs[(j * m + i) * 2] = s
+      uvs[(j * m + i) * 2 + 1] = (i / m)
     }
   }
 
@@ -531,7 +531,7 @@ function buildWedge(params, profile, m, halfLen) {
   ny /= m
   nz /= m
   posArr.set([nx, ny, nz], noseCenter * 3)
-  uvArr.set([0.5, 1], noseCenter * 2)
+  uvArr.set([1, 0.5], noseCenter * 2)
 
   let sx2 = 0
   let sy2 = 0
@@ -546,7 +546,7 @@ function buildWedge(params, profile, m, halfLen) {
   sy2 /= m
   sz2 /= m
   posArr.set([sx2, sy2, sz2], sternCenter * 3)
-  uvArr.set([0.5, 0], sternCenter * 2)
+  uvArr.set([0, 0.5], sternCenter * 2)
 
   for (let i = 0; i < m; i++) {
     const i1 = (i + 1) % m
