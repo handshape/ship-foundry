@@ -1108,8 +1108,10 @@ function buildBridgePillbox(b) {
   group.name = 'bridge:pillbox'
 
   // Low deck collar (mat) under the pillbox body + dome buffer below.
+  // Rotated 30° to match the body's hexagon orientation (flat face forward).
   const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.5, w * 0.56, h * 0.18, 6), mat)
   collar.name = 'bridgePillboxCollar'
+  collar.rotation.y = Math.PI / 6
   collar.position.set(0, topY + h * 0.09, z)
   group.add(collar)
 
@@ -1123,12 +1125,15 @@ function buildBridgePillbox(b) {
 
   // The pillbox body: a hexagonal frustum (6 sides), wider at the base and
   // narrower at the top, so all side faces slope inward. Stretched along the
-  // travel axis so it reads as a flat command deck.
+  // travel axis so it reads as a flat command deck. Rotated 30° so a flat face
+  // (not a point) faces the forward slit, keeping the slit from clipping
+  // through the hexagon's vertex.
   const bodyR = w * 0.52
   const bodyTopR = w * 0.38
   const bodyH = h * 0.55
   const body = new THREE.Mesh(new THREE.CylinderGeometry(bodyTopR, bodyR, bodyH, 6), mat)
   body.name = 'bridgePillboxBody'
+  body.rotation.y = Math.PI / 6
   body.scale.set(1, 1, d / (bodyR * 2))
   body.position.set(0, topY + h * 0.18 + bodyH * 0.5, z)
   group.add(body)
