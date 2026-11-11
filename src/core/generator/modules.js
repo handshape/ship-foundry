@@ -876,16 +876,27 @@ function buildBridgeFaceted(b) {
   canopy.position.set(0, topY + h * 0.5, z + d * 0.05)
   group.add(canopy)
 
-  // Inverted ovoid: a half-sphere with the flat face pointing up (+Y). The
-  // flat face sits at the canopy's midpoint; the ovoid is enlarged so its
-  // curved extent fully covers the canopy's lower facets (no glass points
-  // poking through).
+  // Inverted ovoid: a lower hemisphere (flat face up) + a flat cap disc on the
+  // equator. The flat face sits at the canopy's midpoint; the ovoid is enlarged
+  // so its curved extent fully covers the canopy's lower facets.
   const ovoidR = Math.min(w, d) * 0.6
-  const ovoid = new THREE.Mesh(new THREE.SphereGeometry(ovoidR, 16, 10, 0, PI2, Math.PI * 0.5, Math.PI * 0.5), mat)
+  const ovoidGeo = new THREE.SphereGeometry(ovoidR, 16, 10, 0, PI2, Math.PI * 0.5, Math.PI * 0.5)
+  // The hemisphere's normals point outward (downward) — flip them so the
+  // interior faces the camera when viewed from above.
+  ovoidGeo.scale(1, -1, 1)
+  ovoidGeo.computeVertexNormals()
+  const ovoid = new THREE.Mesh(ovoidGeo, mat)
   ovoid.name = 'bridgeFacetedOvoid'
   ovoid.scale.set(w / (ovoidR * 1.5), (h * 0.55) / ovoidR, d / (ovoidR * 1.3))
   ovoid.position.set(0, topY + h * 0.5, z)
   group.add(ovoid)
+  // Flat cap disc closing the equator (faces up, +Y).
+  const cap = new THREE.Mesh(new THREE.CircleGeometry(ovoidR, 16), mat)
+  cap.name = 'bridgeFacetedOvoidCap'
+  cap.rotation.x = -Math.PI / 2
+  cap.scale.set(w / (ovoidR * 1.5), d / (ovoidR * 1.3), 1)
+  cap.position.set(0, topY + h * 0.5, z)
+  group.add(cap)
 
   return group
 }
