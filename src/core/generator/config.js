@@ -207,7 +207,17 @@ export const SHIP_CONFIG_SCHEMA = {
         type: 'object',
         children: {
           enabled: flag(true),
-          style: choice(['none', 'roundel', 'chevron', 'bar', 'star'], 'roundel'),
+          style: choice(
+            [
+              'none',
+              'roundel', 'chevron', 'bar', 'star',
+              'target', 'crosshair', 'compass', 'gem', 'hexagon', 'diamond',
+              'flag', 'sun', 'circleDot', 'medal', 'award', 'eye',
+              'flame', 'zap', 'atom', 'orbit', 'shieldCheck', 'shieldHalf',
+              'shieldX', 'anchor', 'wind',
+            ],
+            'roundel',
+          ),
         },
       },
       size: num(64, 2048, 512, true),

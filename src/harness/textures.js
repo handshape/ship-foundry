@@ -24,7 +24,7 @@ const TEXTURE_SCHEMA = [
   { key: 'stripesCount', label: 'Stripe count', type: 'number', min: 0, max: 8, step: 1, int: true },
   { key: 'stripesWidth', label: 'Stripe width', type: 'slider', min: 0.02, max: 0.5, step: 0.01 },
   { key: 'emblemEnabled', label: 'Emblem', type: 'toggle' },
-  { key: 'emblemStyle', label: 'Emblem style', type: 'select', options: ['none', 'roundel', 'chevron', 'bar', 'star'] },
+  { key: 'emblemStyle', label: 'Emblem style', type: 'select', options: ['none', 'roundel', 'chevron', 'bar', 'star', 'target', 'crosshair', 'compass', 'gem', 'hexagon', 'diamond', 'flag', 'sun', 'circleDot', 'medal', 'award', 'eye', 'flame', 'zap', 'atom', 'orbit', 'shieldCheck', 'shieldHalf', 'shieldX', 'anchor', 'wind'] },
 ]
 
 // Flatten the working config's texture sub-object into the schema's flat keys

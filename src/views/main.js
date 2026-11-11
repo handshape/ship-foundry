@@ -81,7 +81,7 @@ const TEXTURE_CONTROLS = [
   { key: 'stripes.count', label: 'Stripe count', type: 'number', min: 0, max: 8, step: 1, int: true },
   { key: 'stripes.width', label: 'Stripe width', type: 'slider', min: 0.02, max: 0.5, step: 0.01 },
   { key: 'emblem.enabled', label: 'Emblem', type: 'toggle' },
-  { key: 'emblem.style', label: 'Emblem style', type: 'select', options: ['none', 'roundel', 'chevron', 'bar', 'star'] },
+  { key: 'emblem.style', label: 'Emblem style', type: 'select', options: ['none', 'roundel', 'chevron', 'bar', 'star', 'target', 'crosshair', 'compass', 'gem', 'hexagon', 'diamond', 'flag', 'sun', 'circleDot', 'medal', 'award', 'eye', 'flame', 'zap', 'atom', 'orbit', 'shieldCheck', 'shieldHalf', 'shieldX', 'anchor', 'wind'] },
 ]
 
 // The module groups: the top-level density, then one collapsible group per
@@ -207,6 +207,9 @@ export function mainView() {
           <div class="flex flex-wrap items-center gap-2 px-2 pb-2 pt-1">
             <span class="label-text-alt text-xs mr-1">Camera</span>
             <div class="btn-group" id="cam-group"></div>
+            <button id="btn-transparent" class="btn btn-sm btn-outline" title="Toggle 50% transparent hull">
+              <i data-lucide="eye" class="w-4 h-4"></i> X-ray
+            </button>
           </div>
         </div>
       </div>
@@ -281,6 +284,7 @@ export function mainView() {
     vp.setShip(group)
     if (old) disposeGroup(old)
     updateShipCard(cfg)
+    applyXray() // re-apply X-ray state to the fresh group
   }
 
   const debouncedRegenerate = debounce(regenerate, 120)
@@ -440,6 +444,7 @@ export function mainView() {
     buildAestheticSelect(cfg)
     buildControls(cfg)
     updateShipCard(cfg)
+    applyXray() // re-apply X-ray state to the fresh group
   }
 
   // --- aesthetic picker ------------------------------------------------------
@@ -462,6 +467,22 @@ export function mainView() {
     btn.addEventListener('click', () => vp.setCameraPreset(p.key))
     camGroup.appendChild(btn)
   }
+
+  // --- X-ray (transparency) toggle -------------------------------------------
+  // Toggles the ship to 50% transparent so the interior is visible. The state
+  // is local to this view (not part of the ShipConfig) — it's a viewport aid,
+  // not a ship property. Re-applied on regenerate so it survives re-rolls.
+  let xrayOn = false
+  const xrayBtn = el.querySelector('#btn-transparent')
+  const applyXray = () => {
+    vp.setTransparency(xrayOn, 0.5)
+    xrayBtn.classList.toggle('btn-primary', xrayOn)
+    xrayBtn.classList.toggle('btn-outline', !xrayOn)
+  }
+  xrayBtn.addEventListener('click', () => {
+    xrayOn = !xrayOn
+    applyXray()
+  })
 
   // --- randomize -------------------------------------------------------------
   el.querySelector('#btn-random').addEventListener('click', () => {

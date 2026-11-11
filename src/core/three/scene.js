@@ -232,6 +232,25 @@ export function createViewport(container, { preset = 'three-quarter', antialias 
     controls.update()
   }
 
+  // Toggle the ship's transparency. When `on`, every ship material becomes
+  // semi-transparent (opacity 0.5, depthWrite off) so the interior is visible;
+  // when off, materials return to fully opaque. `opacity` is optional (default
+  // 0.5). The change is applied live to the current ship without regenerating.
+  const setTransparency = (on, opacity = 0.5) => {
+    if (!ship) return
+    ship.traverse((o) => {
+      if (!o.isMesh) return
+      const mats = Array.isArray(o.material) ? o.material : [o.material]
+      for (const m of mats) {
+        if (!m || typeof m.opacity !== 'number') continue
+        m.transparent = on
+        m.opacity = on ? opacity : 1
+        m.depthWrite = !on // avoid self-sorting artifacts when transparent
+        m.needsUpdate = true
+      }
+    })
+  }
+
   // Apply the initial preset direction (framing replaces the distance once
   // a ship is set and the container is laid out).
   setCameraPreset(preset)
@@ -294,6 +313,7 @@ export function createViewport(container, { preset = 'three-quarter', antialias 
     controls,
     setShip,
     setCameraPreset,
+    setTransparency,
     startLoop,
     stopLoop,
     resize,

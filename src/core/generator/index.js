@@ -53,6 +53,7 @@ export function generateShip(config = {}, seed) {
     hullGroup: hull.group,
     color: cfg.texture.palette?.[0] ?? null,
     glowColor: cfg.texture.palette?.[3] ?? null,
+    accent: cfg.texture.palette?.[2] ?? null,
   })
 
   // The hull is a Group of one or more body meshes (lofted, disc, wedge,
