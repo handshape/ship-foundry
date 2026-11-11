@@ -1145,7 +1145,7 @@ function buildBridgePillbox(b) {
   // The frustum's front face slopes inward, so the slit is positioned at the
   // mid-height radius (average of top and base) and pushed slightly forward
   // to sit on the sloped surface.
-  const slitW = w * 0.5
+  const slitW = w * 0.425
   const slitH = h * 0.04
   const midR = (bodyR + bodyTopR) * 0.5
   const frontZ = z + midR * (d / (bodyR * 2)) * 0.866 + h * 0.01
