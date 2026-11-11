@@ -858,47 +858,48 @@ function buildBridgeNose(rng, b) {
   return group
 }
 
-// Faceted (default): a gem-like, bevelled cockpit built from a faceted
-// (icosahedron) hull body (mat) with a faceted glass canopy (glass) and a thin
-// glowing visor line (glow). The body is a flat-topped icosahedron squashed into
-// a low, angular superstructure; the canopy is a smaller faceted glass dome set
-// into its top — a proper multi-facet silhouette, not a box.
+// Faceted (default): a low, angular cockpit with a shallow cylindrical body
+// (mat), a shallow ovoid underneath (the hull-overlap part that seats the
+// bridge on the deck), a faceted glass canopy (glass) crowning the body, and a
+// thin glowing visor line (glow) along the canopy's base.
 function buildBridgeFaceted(b) {
   const { mat, glowMat, glass, w, h, d, z, topY } = b
   const group = new THREE.Group()
   group.name = 'bridge:faceted'
 
-  // Faceted hull body: a TRUNCATED icosahedron (soccer ball — 12 pentagons +
-  // 20 hexagons, "frustrated points"), squashed low (y) and stretched along the
-  // travel axis (z) so it reads as a low, angular superstructure with bevelled,
-  // multi-facet sides rather than sharp icosahedron points.
-  const bodyR = Math.min(w, d) * 0.62
-  const body = new THREE.Mesh(makeTruncatedIcosahedron(bodyR), mat)
-  body.name = 'bridgeBody'
-  body.scale.set(w / bodyR, (h * 0.55) / bodyR, d / bodyR)
-  body.position.set(0, topY + h * 0.42, z)
-  group.add(body)
+  // Shallow ovoid underneath: a squashed sphere that overlaps the hull,
+  // seating the bridge on the deck. Stretched along the travel axis.
+  const ovoidR = Math.min(w, d) * 0.55
+  const ovoid = new THREE.Mesh(new THREE.SphereGeometry(ovoidR, 16, 10, 0, PI2, 0, Math.PI * 0.5), mat)
+  ovoid.name = 'bridgeFacetedOvoid'
+  ovoid.scale.set(w / (ovoidR * 2), (h * 0.3) / ovoidR, d / (ovoidR * 1.8))
+  ovoid.position.set(0, topY, z)
+  group.add(ovoid)
 
-  // A flat deck collar (mat) under the canopy so the glass sits in a rim.
-  const collar = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.4, w * 0.46, h * 0.16, 6), mat)
-  collar.name = 'bridgeFacetedCollar'
-  collar.position.set(0, topY + h * 0.72, z)
-  group.add(collar)
+  // Shallow cylindrical body: a low cylinder that forms the main deck of the
+  // bridge. Slightly wider than the ovoid so it reads as a distinct platform.
+  const bodyR = Math.min(w, d) * 0.52
+  const bodyH = h * 0.35
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(bodyR, bodyR * 1.05, bodyH, 8), mat)
+  body.name = 'bridgeBody'
+  body.scale.set(w / (bodyR * 2), 1, d / (bodyR * 1.8))
+  body.position.set(0, topY + h * 0.3 + bodyH * 0.5, z)
+  group.add(body)
 
   // Faceted glass canopy: a smaller TRUNCATED icosahedron (glass) crowning the
   // body, squashed to a low dome and stretched toward the bow — a soccer-ball
   // glass dome rather than a sharp icosahedron.
-  const glassR = bodyR * 0.62
+  const glassR = bodyR * 0.6
   const canopy = new THREE.Mesh(makeTruncatedIcosahedron(glassR), glass)
   canopy.name = 'bridgeGlass'
-  canopy.scale.set(w / (glassR * 1.4), (h * 0.4) / glassR, d / (glassR * 1.2))
-  canopy.position.set(0, topY + h * 0.86, z + d * 0.05)
+  canopy.scale.set(w / (glassR * 1.6), (h * 0.35) / glassR, d / (glassR * 1.4))
+  canopy.position.set(0, topY + h * 0.55, z + d * 0.05)
   group.add(canopy)
 
   // A thin glowing visor line (glow) along the canopy's base.
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(w * 0.5, h * 0.05, d * 0.7), glowMat)
+  const visor = new THREE.Mesh(new THREE.BoxGeometry(w * 0.45, h * 0.04, d * 0.65), glowMat)
   visor.name = 'bridgeVisor'
-  visor.position.set(0, topY + h * 0.78, z + d * 0.03)
+  visor.position.set(0, topY + h * 0.48, z + d * 0.03)
   group.add(visor)
 
   return group
