@@ -859,12 +859,11 @@ function buildBridgeNose(rng, b) {
 }
 
 // Faceted (default): a low, angular cockpit with an inverted ovoid (mat) whose
-// flat face points up (+Y) and seats the bridge on the deck, a faceted glass
-// canopy (glass) crowning the ovoid, and a thin glowing visor line (glow) along
-// the canopy's base. The ovoid's extents cover the bottom half of the canopy so
-// the glass appears to grow out of the hull.
+// flat face points up (+Y) and seats the bridge on the deck, and a faceted
+// glass canopy (glass) crowning the ovoid. The ovoid's curved extent covers
+// the bottom half of the canopy so the glass appears to grow out of the hull.
 function buildBridgeFaceted(b) {
-  const { mat, glowMat, glass, w, h, d, z, topY } = b
+  const { mat, glass, w, h, d, z, topY } = b
   const group = new THREE.Group()
   group.name = 'bridge:faceted'
 
@@ -878,21 +877,15 @@ function buildBridgeFaceted(b) {
   group.add(canopy)
 
   // Inverted ovoid: a half-sphere with the flat face pointing up (+Y). The
-  // flat face sits at the canopy's midpoint so the ovoid's curved extent
-  // covers the bottom half of the glass dome, making the canopy look like it
-  // grows out of the hull.
-  const ovoidR = Math.min(w, d) * 0.55
+  // flat face sits at the canopy's midpoint; the ovoid is enlarged so its
+  // curved extent fully covers the canopy's lower facets (no glass points
+  // poking through).
+  const ovoidR = Math.min(w, d) * 0.6
   const ovoid = new THREE.Mesh(new THREE.SphereGeometry(ovoidR, 16, 10, 0, PI2, Math.PI * 0.5, Math.PI * 0.5), mat)
   ovoid.name = 'bridgeFacetedOvoid'
-  ovoid.scale.set(w / (ovoidR * 1.8), (h * 0.5) / ovoidR, d / (ovoidR * 1.6))
+  ovoid.scale.set(w / (ovoidR * 1.5), (h * 0.55) / ovoidR, d / (ovoidR * 1.3))
   ovoid.position.set(0, topY + h * 0.5, z)
   group.add(ovoid)
-
-  // A thin glowing visor line (glow) along the canopy's base.
-  const visor = new THREE.Mesh(new THREE.BoxGeometry(w * 0.45, h * 0.04, d * 0.65), glowMat)
-  visor.name = 'bridgeVisor'
-  visor.position.set(0, topY + h * 0.48, z + d * 0.03)
-  group.add(visor)
 
   return group
 }
