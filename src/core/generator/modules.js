@@ -881,10 +881,6 @@ function buildBridgeFaceted(b) {
   // so its curved extent fully covers the canopy's lower facets.
   const ovoidR = Math.min(w, d) * 0.6
   const ovoidGeo = new THREE.SphereGeometry(ovoidR, 16, 10, 0, PI2, Math.PI * 0.5, Math.PI * 0.5)
-  // The hemisphere's normals point outward (downward) — flip them so the
-  // interior faces the camera when viewed from above.
-  ovoidGeo.scale(1, -1, 1)
-  ovoidGeo.computeVertexNormals()
   const ovoid = new THREE.Mesh(ovoidGeo, mat)
   ovoid.name = 'bridgeFacetedOvoid'
   ovoid.scale.set(w / (ovoidR * 1.5), (h * 0.55) / ovoidR, d / (ovoidR * 1.3))
