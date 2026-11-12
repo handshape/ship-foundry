@@ -105,7 +105,7 @@ export const NACELLE_ANGLE_OPTIONS = ['up', 'level', 'down']
 //   scallop  -> a recessed, scalloped cut-out: a ring with a glowing concave dish
 //   flared   -> a flared bell/cone that widens aft (a nozzle-like exhaust)
 //   vented   -> a flat cap with a glowing central port + a ring of small vents
-export const NACELLE_TAIL_OPTIONS = ['dome', 'point', 'scallop', 'flared', 'vented']
+export const NACELLE_TAIL_OPTIONS = ['dome', 'point', 'scallop', 'flared', 'vented', 'cowled']
 // The pod's BODY type: 'standard' is the current long tapered cylinder pod;
 // 'crystal' is a faceted hexagonal prism with pointed caps at both ends (the old
 // crystal engine, now a nacelle pod). Independent of mount — a crystal pod can
@@ -1286,6 +1286,55 @@ function buildCommandSpikeArray(b) {
   return group
 }
 
+// Build an obliquely-cut tube: an open cylinder (the tube wall) whose aft end
+// is sheared so the rim becomes a slanted line, giving a "cut at an angle"
+// look. The slant runs HORIZONTALLY (shear in X): the port and starboard
+// edges of the mouth are cut to different depths, so the opening is an angled
+// hole rather than a flat circle.
+//   `radius`  — the tube's radius (matches the pod).
+//   `length`  — the tube's fore-aft length before the slant.
+//   `mat`     — the tube wall material.
+// Returns a THREE.Mesh. The tube's fore end is a full circle; the aft end is
+// the slanted cut. The tube is OPEN (a hollow wall) — the caller adds a cap
+// (e.g. a glow disc deep inside) on the angled face.
+function buildObliqueTube(radius, length, mat) {
+  const segments = 18
+  // The slant: how far the aft rim is offset fore/aft relative to the centre,
+  // proportional to the vertex's position along `axis`. A steeper slant gives a
+  // more dramatic angled cut.
+  const slantFrac = 0.5 // aft rim offset = slantFrac * radius * (pos / radius)
+  // Build the tube wall as an open cylinder. CylinderGeometry's axis is Y; we
+  // rotate it to Z (rotation.x = PI/2 maps +Y -> +Z) so the tube runs fore-aft.
+  // The geometry is built with the fore end at +Y (which becomes +Z after
+  // rotation... actually we want the fore at the pod and the cut aft). We build
+  // it centred then shift so the fore end is at local z = +length/2 and the aft
+  // (cut) end toward -Z.
+  const geo = new THREE.CylinderGeometry(radius, radius, length, segments, 1, true)
+  // Shear: offset each vertex's local Y (which maps to world Z after rotation)
+  // proportional to its X or Y coordinate, creating the slanted aft rim. The
+  // shear is applied in the geometry's local Y-axis frame BEFORE rotation.
+  const pos = geo.attributes.position
+  const v = new THREE.Vector3()
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i)
+    // Only shear the AFT half (local y < 0, which becomes the -Z/aft side).
+    // The fore half (y > 0) stays a full circle. The shear magnitude grows
+    // linearly from 0 at the centre (y=0) to max at the aft rim (y=-length/2).
+    if (v.y < 0) {
+      const t = -v.y / (length / 2) // 0 at centre, 1 at the aft rim
+      // Shift the vertex toward -Y (aft) proportional to its X coordinate:
+      // vertices further outboard (larger |x|) are pushed further aft, creating
+      // the horizontal slant.
+      v.y -= Math.abs(v.x) * slantFrac * t
+    }
+    pos.setXYZ(i, v.x, v.y, v.z)
+  }
+  geo.computeVertexNormals()
+  const mesh = new THREE.Mesh(geo, mat)
+  mesh.rotation.x = Math.PI / 2 // tube axis -> +Z (fore-aft)
+  return mesh
+}
+
 // Nacelle trailing-end (aft cap) builder. `tail` selects the form (see
 // NACELLE_TAIL_OPTIONS); the cap is +Z-aligned and centred on the pod's aft face
 // at (x, y, z). `r` is the pod radius, `len` its length (used to scale the cap).
@@ -1335,13 +1384,15 @@ function buildNacelleTail(group, tail, x, y, z, r, len, mat, glowMat) {
       dish.position.set(x, y, z + r * 0.12) // recessed fore of the rim, so the dish is concave aft
       group.add(dish)
       // Scallops: a ring of small glowing bumps around the rim's inner edge, so the
-      // cut-out reads as scalloped rather than a plain circle.
+      // cut-out reads as scalloped rather than a plain circle. The ring and dish
+      // sit in the X-Y plane (normal along Z, framing the aft face), so the bumps
+      // are placed in X-Y (x + cos, y + sin) — NOT Y-Z.
       const nScallop = 8
       for (let k = 0; k < nScallop; k++) {
         const a = (k / nScallop) * PI2
         const bump = new THREE.Mesh(new THREE.SphereGeometry(r * 0.1, 6, 5), glowMat)
         bump.name = 'nacelleTailScallopBump'
-        bump.position.set(x, y + Math.cos(a) * r * 0.62, z + Math.sin(a) * r * 0.62)
+        bump.position.set(x + Math.cos(a) * r * 0.62, y + Math.sin(a) * r * 0.62, z)
         group.add(bump)
       }
       break
@@ -1392,6 +1443,27 @@ function buildNacelleTail(group, tail, x, y, z, r, len, mat, glowMat) {
         vent.position.set(x + Math.cos(a) * r * 0.68, y + Math.sin(a) * r * 0.68, z - r * 0.07)
         group.add(vent)
       }
+      break
+    }
+    case 'cowled': {
+      // A cowed exhaust: a HOLLOW extension of the nacelle tube, cut off at an
+      // angle. The tube continues the pod's radius and is sliced obliquely so
+      // you can look INTO the tube through the angled mouth. The slant runs
+      // HORIZONTALLY (shear in X): the port and starboard edges of the mouth are
+      // cut to different depths, so the opening is a parallelogram-ish angled
+      // hole rather than a flat circle.
+      const tube = buildObliqueTube(r, len * 0.22, mat)
+      tube.name = 'nacelleTailCowl'
+      tube.position.set(x, y, z - len * 0.11)
+      group.add(tube)
+      // A glowing disc deep inside the tube (the exhaust glow seen through the
+      // angled mouth), facing aft (-Z) and tilted to the slant.
+      const inner = new THREE.Mesh(new THREE.CircleGeometry(r * 0.95, 18), glowMat)
+      inner.name = 'nacelleTailCowlInner'
+      inner.rotation.y = Math.PI
+      inner.rotation.z = Math.atan2(len * 0.22 * 0.5, r * 2) // tilt to the horizontal slant
+      inner.position.set(x, y, z - len * 0.2)
+      group.add(inner)
       break
     }
     case 'dome':
@@ -1955,6 +2027,72 @@ function buildWeapon(rng, ctx) {
   // at count=1 (x=0) are centreline placements; exclude them from the
   // port/stbd mirror so they aren't doubled onto themselves.
   if (position === 'nose' || position === 'belly' || (position === 'chin' && mountX === 0)) g.userData.isCentreline = true
+  return g
+}
+
+// Build a SINGLE weapon mounted on the flat top of a rectangular block — a
+// deterministic test fixture for the weapons harness. The block is described by
+// `block = { width, height, depth }`; the weapon sits on its top face (y =
+// height/2) at the centreline, barrel pointing +Z. Reuses `buildWeapon` with a
+// synthetic flat "hull" (a box HullInfo) so the weapon's own geometry is
+// identical to a ship-mounted one. Returns the weapon THREE.Group (unpositioned
+// relative to the block's origin, i.e. the block is centred at the origin).
+export function buildWeaponOnBlock(rng, weaponCfg, block) {
+  const { width, height, depth } = block
+  const hullInfo = {
+    length: depth,
+    beam: width,
+    height,
+    noseZ: depth / 2,
+    sternZ: -depth / 2,
+    archetype: 'blocky',
+    body: 'blocky',
+    anchors: {
+      top: new THREE.Vector3(0, height / 2, 0),
+      bottom: new THREE.Vector3(0, -height / 2, 0),
+      port: new THREE.Vector3(-width / 2, 0, 0),
+      starboard: new THREE.Vector3(width / 2, 0, 0),
+      fore: new THREE.Vector3(0, height / 2, depth / 2),
+      aft: new THREE.Vector3(0, 0, -depth / 2),
+    },
+  }
+  // A flat-top surface query: every point on the top face is at y = height/2.
+  const flatTop = height / 2
+  const surface = {
+    surfaceAt: (dir) => (dir === 'top' ? flatTop : dir === 'bottom' ? -flatTop : width / 2),
+    tubeSurfaceAt: (dir, _z) => surface.surfaceAt(dir, _z),
+    girthAt: () => Math.min(width, height),
+    surfaceRadiusAt: (angle) => Math.max(Math.abs(Math.cos(angle)) * (width / 2), Math.abs(Math.sin(angle)) * (height / 2)),
+    bestGirthZ: () => 0,
+    maxSideAt: () => width / 2,
+    hasGeometry: true,
+  }
+  const glowMat = makeGlowMaterial(null)
+  const params = { weapons: { ...weaponCfg, count: 1 } }
+  const ctx = {
+    mat: defaultMaterial(),
+    glowMat,
+    hull: hullInfo,
+    top: hullInfo.anchors.top,
+    bottom: hullInfo.anchors.bottom,
+    port: hullInfo.anchors.port,
+    starboard: hullInfo.anchors.starboard,
+    fore: hullInfo.anchors.fore,
+    aft: hullInfo.anchors.aft,
+    params,
+    surface,
+    glowColor: null,
+    color: DEFAULT_PALETTE[0],
+    accent: DEFAULT_PALETTE[2],
+    i: 0,
+    t: 0.5,
+    n: 1,
+  }
+  const g = buildWeapon(rng, ctx)
+  // `buildWeapon` places the weapon relative to the hull origin with the barrel
+  // pointing +Z; the flat-top mount already sits on y = height/2 (the top face),
+  // so the returned group is ready to add to a scene where the block is centred
+  // at the origin.
   return g
 }
 
@@ -2666,6 +2804,23 @@ function buildAntennaDish(b) {
 
 // Hangar: large bay on the port/starboard side. `count` is 1 or 2 (one per
 // side when 2). A family of three distinct silhouettes, each multi-part and
+// Fog-like emissive fill for hangar interiors: a semi-transparent volume that
+// sits inside the cavity and gives the "interior" a soft, volumetric glow
+// rather than a flat emissive panel. Uses MeshBasicMaterial (unlit) with low
+// opacity + BackSide so it reads as a glowing mist from outside the opening.
+function makeHangarFog(glowMat) {
+  const color = glowMat.emissive
+    ? new THREE.Color(glowMat.emissive)
+    : new THREE.Color(0x36c8ff)
+  return new THREE.MeshBasicMaterial({
+    color,
+    transparent: true,
+    opacity: 0.25,
+    side: THREE.BackSide,
+    depthWrite: false,
+  })
+}
+
 // multi-material (hull `mat` + the hangar amber glow accent):
 //   bay (default): the existing boxy bay + inset door.
 //   pod:           a rounded hangar pod with a glowing docking-ring door.
@@ -2831,6 +2986,17 @@ function buildHangarBay(b) {
   back.position.set(backX, cy, z)
   group.add(back)
 
+  // Fog volume: a semi-transparent box filling the cavity interior, giving the
+  // hangar a soft volumetric glow instead of a flat back panel.
+  const fogMat = makeHangarFog(glowMat)
+  const fog = new THREE.Mesh(
+    new THREE.BoxGeometry(w * 0.8, openH * 0.9, openW * 0.9),
+    fogMat,
+  )
+  fog.name = 'hangarFog'
+  fog.position.set(cx - side * recess * 0.5, cy, z)
+  group.add(fog)
+
   // A thin emissive rim lining the opening's inner edges (the void's lip), so the
   // cavity reads as a lit opening rather than a flat hole. Four thin bars framing
   // the outboard face of the opening.
@@ -2890,6 +3056,17 @@ function buildHangarPod(b) {
   back.rotation.y = side === 1 ? Math.PI / 2 : -Math.PI / 2
   group.add(back)
 
+  // Fog volume: a semi-transparent sphere filling the pod interior.
+  const fogMat = makeHangarFog(glowMat)
+  const fog = new THREE.Mesh(
+    new THREE.SphereGeometry(openR * 0.9, 16, 12),
+    fogMat,
+  )
+  fog.name = 'hangarPodFog'
+  fog.scale.set(w * 0.4 / (openR * 0.9), 1, 1)
+  fog.position.set(cx + side * (w * 0.1), cy, z)
+  group.add(fog)
+
   // A glowing ring lining the opening's rim (the void's lip), so the cavity
   // reads as a lit port rather than a flat hole.
   const ring = new THREE.Mesh(new THREE.TorusGeometry(openR, Math.min(h, d) * 0.03, 10, 24), glowMat)
@@ -2942,6 +3119,18 @@ function buildHangarDock(b) {
   back.position.set(outX - side * recess, cy, z)
   back.rotation.y = side === 1 ? Math.PI / 2 : -Math.PI / 2
   group.add(back)
+
+  // Fog volume: a semi-transparent cylinder filling the dock interior.
+  const fogMat = makeHangarFog(glowMat)
+  const fog = new THREE.Mesh(
+    new THREE.CylinderGeometry(shellR * 0.8, shellR * 0.8, shellLen * 0.7, 16, 1, true),
+    fogMat,
+  )
+  fog.name = 'dockFog'
+  fog.rotation.z = Math.PI / 2
+  fog.rotation.x = Math.PI / 2
+  fog.position.set(cx - side * shellLen * 0.3, cy, z)
+  group.add(fog)
 
   // A glowing curved rim (torus segment, 180°) lining the opening's edge.
   const rimR = shellR

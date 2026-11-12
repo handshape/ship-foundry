@@ -122,6 +122,26 @@ export function runHarness(harness) {
   const previewEl = page.querySelector('.harness-preview')
   const compareInput = page.querySelector('input.toggle')
 
+  // Some harnesses own their preview entirely (e.g. the weapons harness renders
+  // an isolated block + single weapon, not the full ship). When `ownsPreview`
+  // is set, runHarness skips its default full-ship preview and hands the
+  // harness the raw preview element so it can build its own scene.
+  if (harness.ownsPreview) {
+    harness.build(controlsEl, {
+      getConfig() {
+        return appState.get()
+      },
+      patchConfig(patch) {
+        appState.patchConfig(patch)
+      },
+      async saveConfig(name) {
+        return appState.savePreset(name || harness.title)
+      },
+      previewEl,
+    })
+    return page
+  }
+
   const vp = createViewport(previewEl, { preset: 'three-quarter' })
 
   // The live preview group. It holds both the generated ship and the

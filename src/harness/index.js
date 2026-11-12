@@ -3,6 +3,7 @@
 import './hull.js'
 import './textures.js'
 import './modules.js'
+import './weapons.js'
 import './aesthetics.js'
 import './export.js'
 
