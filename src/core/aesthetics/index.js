@@ -17,7 +17,7 @@
 // seeds give variety within the aesthetic. Ranges stay inside the schema bounds
 // so the resolved config always passes validateConfig.
 
-import { BRIDGE_STYLES, WEAPON_STYLES, WEAPON_POSITIONS, NACELLE_STRUT_STYLES, NACELLE_LIFT_OPTIONS, NACELLE_ANGLE_OPTIONS, NACELLE_TAIL_OPTIONS, NACELLE_MOUNTS, NACELLE_TYPES, HANGAR_POSITIONS } from '../generator/modules.js'
+import { BRIDGE_STYLES, WEAPON_STYLES, WEAPON_POSITIONS, NACELLE_STRUT_STYLES, NACELLE_LIFT_OPTIONS, NACELLE_ANGLE_OPTIONS, NACELLE_TAIL_OPTIONS, NACELLE_MOUNTS, NACELLE_TYPES, HANGAR_STYLES, HANGAR_POSITIONS } from '../generator/modules.js'
 
 // --- range descriptors (internal) --------------------------------------------
 // Each is a plain object the resolver understands. `kind` is optional when the
@@ -107,7 +107,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: true, count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.6), count: N(1, 3, true) }),
-        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(['bay', 'bay', 'dock']) }),
+        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
       },
       texture: {
         palette: P([
@@ -199,7 +199,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.5), count: N(2, 6, true), size: N(0.7, 1.3), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.6), count: C([1, 2]), height: N(3, 7), style: 'ring' }),
         antenna: M({ enabled: B(0.5), count: N(2, 4, true) }),
-        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(['pod', 'pod', 'bay']) }),
+        hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
       },
       texture: {
         palette: P([
@@ -246,7 +246,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.5), count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 4, true) }),
-        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(['pod', 'dock', 'bay']) }),
+        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
       },
       texture: {
         palette: P([
@@ -292,7 +292,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: true, count: N(2, 6, true), size: N(1.0, 1.8), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.7), count: C([2, 4]), height: N(6, 10) }),
         antenna: M({ enabled: B(0.6), count: N(3, 6, true) }),
-        hangar: M({ enabled: B(0.4), count: 1, position: C(HANGAR_POSITIONS), style: C(['dock', 'dock', 'bay']) }),
+        hangar: M({ enabled: B(0.4), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
       },
       texture: {
         palette: P([
@@ -384,7 +384,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.4), count: N(1, 4, true), size: N(0.7, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 5, true) }),
-        hangar: M({ enabled: B(0.85), count: 1, position: C(HANGAR_POSITIONS), style: C(['bay', 'bay', 'dock']) }),
+        hangar: M({ enabled: B(0.85), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
       },
       texture: {
         palette: P([
@@ -429,7 +429,7 @@ const AESTHETIC_DEFS = {
         weapons: M({ enabled: B(0.6), count: N(0, 4, true), size: N(0.6, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(2, 5) }),
         antenna: M({ enabled: B(0.5), count: N(0, 3, true) }),
-        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(['bay', 'bay', 'pod', 'dock']) }),
+        hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
       },
       texture: {
         palette: P([

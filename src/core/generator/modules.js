@@ -110,7 +110,7 @@ export const NACELLE_TAIL_OPTIONS = ['dome', 'point', 'scallop', 'flared', 'vent
 // 'crystal' is a faceted hexagonal prism with pointed caps at both ends (the old
 // crystal engine, now a nacelle pod). Independent of mount — a crystal pod can
 // be pylon/aft/waist mounted.
-export const NACELLE_TYPES = ['standard', 'crystal']
+export const NACELLE_TYPES = ['standard', 'crystal', 'cluster', 'spindle', 'spindleX', 'spindleY', 'boxy']
 // The pod's MOUNT configuration (replaces the old engineBlocks system): the
 // three propulsion layouts a ship can have. Only one mount per ship.
 //   pylon -> long pods on swept struts off the flank (the current nacelle look).
@@ -1497,8 +1497,8 @@ function buildNacelle(rng, ctx) {
   const t = ctx.t
   const i = ctx.i
   const s = cfg.size ?? 1
-  const mount = NACELLE_MOUNTS.includes(cfg.mount) ? cfg.mount : 'pylon'
   const type = NACELLE_TYPES.includes(cfg.type) ? cfg.type : 'standard'
+  const mount = NACELLE_MOUNTS.includes(cfg.mount) ? cfg.mount : 'pylon'
   const n = cfg.count || 2
   // Waist mounts a single pair: the half-group holds one pod at +X, mirrored to
   // the -X twin. Force side=+1 so the lone half-group pod always sits at +X.
@@ -1632,8 +1632,10 @@ function buildNacelle(rng, ctx) {
   buildNacellePod(group, type, podCenter, r, len, hasNose, mat, glowMat, glowColor, i, mount === 'aft')
 
   // The pod's AFT end cap (distinct exhaust form per ship). Crystal pods have
-  // their own pointed stern cap (built in buildNacellePod), so no tail decoration.
-  if (type !== 'crystal') {
+  // their own pointed stern cap; fin/cluster/spindle/boxy have their own
+  // built-in exhaust features (glowing trailing edge, ports, belt, aperture).
+  // Only standard pods get a tail decoration.
+  if (type === 'standard') {
     const tail = NACELLE_TAIL_OPTIONS.includes(cfg.tail) ? cfg.tail : 'dome'
     const aftZ = z - len * 0.5
     buildNacelleTail(group, tail, podCenter.x, podCenter.y, aftZ, r, len, mat, glowMat)
@@ -1645,6 +1647,426 @@ function buildNacelle(rng, ctx) {
   }
 
   return group
+}
+
+// Cluster: a bank of three small pods in a triangular arrangement (two inboard,
+// one outboard) with a connecting plate and a small glowing exhaust port on each.
+function buildNacelleCluster(group, center, r, len, mat, glowMat) {
+  const podR = r * 0.42
+  const podLen = len * 0.5
+  const dx = r * 0.75
+  const dy = r * 0.7
+
+  // Connecting plate: a flat box behind the three pods.
+  const plateH = dy * 2 + podR
+  const plate = new THREE.Mesh(
+    new THREE.BoxGeometry(r * 0.15, plateH, len * 0.55),
+    mat,
+  )
+  plate.name = 'nacelleClusterPlate'
+  plate.position.set(center.x, center.y, center.z - len * 0.05)
+  group.add(plate)
+
+  // Three pods: two inboard (lower, at ±dx) and one outboard (upper).
+  const pods = [
+    { x: center.x - dx, y: center.y - dy * 0.6 },
+    { x: center.x + dx, y: center.y - dy * 0.6 },
+    { x: center.x, y: center.y + dy },
+  ]
+  for (let k = 0; k < pods.length; k++) {
+    const p = pods[k]
+    const pod = new THREE.Mesh(
+      new THREE.CylinderGeometry(podR * POD_TAPER, podR, podLen, 12),
+      mat,
+    )
+    pod.name = `nacelleClusterPod${k}`
+    pod.rotation.x = Math.PI / 2
+    pod.position.set(p.x, p.y, center.z)
+    group.add(pod)
+
+    // Small glowing exhaust port on each pod's aft end.
+    const port = new THREE.Mesh(
+      new THREE.CircleGeometry(podR * 0.6, 12),
+      glowMat,
+    )
+    port.name = `nacelleClusterPort${k}`
+    port.rotation.y = Math.PI
+    port.position.set(p.x, p.y, center.z - podLen * 0.5 - 0.01)
+    group.add(port)
+  }
+}
+
+// Spindle: a smooth, elongated spherical pod with a luminous belt (glowing ring)
+// encircling its midsection. The belt's orientation depends on the variant:
+//   'spindle'    -> belt in X-Y plane (normal along Z, the travel axis)
+//   'spindleX'   -> belt in Y-Z plane (normal along X, the outboard axis)
+//   'spindleY'   -> belt in X-Z plane (normal along Y, the vertical axis)
+function buildNacelleSpindle(group, center, r, len, mat, glowMat, beltAxis = 'z') {
+  const body = new THREE.Mesh(new THREE.SphereGeometry(r, 20, 16), mat)
+  body.name = 'nacelleSpindleBody'
+  body.scale.set(1, 1, len / (r * 2))
+  body.position.copy(center)
+  group.add(body)
+
+  // Luminous belt: a torus encircling the spindle's equator. The torus's
+  // default plane is X-Y (normal +Z). For beltAxis 'x' or 'y' we rotate it
+  // into the Y-Z or X-Z plane respectively. Slightly larger than the body's
+  // radius so it protrudes. For 'x' and 'y' the torus is also stretched in its
+  // local X (which becomes the travel axis Z after rotation) to match the
+  // body's elongated Z extent, so the belt hugs the spindle's full length.
+  const elong = len / (r * 2)
+  const belt = new THREE.Mesh(
+    new THREE.TorusGeometry(r * 1.04, r * 0.07, 10, 28),
+    glowMat,
+  )
+  belt.name = 'nacelleSpindleBelt'
+  if (beltAxis === 'x') {
+    belt.rotation.y = Math.PI / 2 // X-Y -> Y-Z (normal along X)
+    belt.scale.set(elong, 1, 1) // local X -> world Z (travel axis)
+  } else if (beltAxis === 'y') {
+    belt.rotation.x = Math.PI / 2 // X-Y -> X-Z (normal along Y)
+    belt.scale.set(1, elong, 1) // local Y -> world -Z (travel axis)
+  }
+  belt.position.copy(center)
+  group.add(belt)
+}
+
+// Boxy: a tall rectangular box (uniform cross-section along its length) with a
+// variable bevel on its edges and a recessed glowing exhaust aperture on the aft
+// face. Taller than wide. The bevel amount varies per-instance via the seeded rng.
+function buildNacelleBoxy(group, center, r, len, mat, glowMat, rng) {
+  const w = r * 1.2
+  const h = r * 2.2
+
+  // Variable bevel: a fraction of the smaller dimension, drawn per-instance
+  // so different boxy nacelles on the same ship can have different edge
+  // chamfers (0 = sharp box, up to ~30% of the width for a heavily chamfered
+  // look).
+  const bevelFrac = rng.range(0, 0.3)
+  const bevel = w * bevelFrac
+
+  // Rectangle shape in the X-Y plane (width w, height h), centered at origin.
+  const shape = new THREE.Shape()
+  shape.moveTo(-w / 2, -h / 2)
+  shape.lineTo(w / 2, -h / 2)
+  shape.lineTo(w / 2, h / 2)
+  shape.lineTo(-w / 2, h / 2)
+  shape.closePath()
+
+  const boxGeo = new THREE.ExtrudeGeometry(shape, {
+    depth: len,
+    bevelEnabled: bevel > 0.001,
+    bevelThickness: bevel,
+    bevelSize: bevel,
+    bevelSegments: 1,
+  })
+  boxGeo.translate(0, 0, -len / 2)
+
+  const box = new THREE.Mesh(boxGeo, mat)
+  box.name = 'nacelleBoxyBody'
+  box.position.copy(center)
+  group.add(box)
+
+  // Fore cap (front, +Z) and aft cap (rear, -Z) — drawn per-instance from the
+  // seeded rng so different boxy nacelles on the same ship can have different
+  // cap styles. The cap sits on the face plane, centered at (center.x,
+  // center.y).
+  const foreZ = center.z + len * 0.5
+  const aftZ = center.z - len * 0.5
+  const capStyle = rng.pick(['port', 'flat', 'nozzle', 'slit', 'grille', 'chevron', 'dualPort', 'lens', 'blade'])
+
+  // --- Fore cap (+Z face) ---
+  switch (capStyle) {
+    case 'port': {
+      const port = new THREE.Mesh(
+        new THREE.CircleGeometry(Math.min(w, h) * 0.35, 12),
+        glowMat,
+      )
+      port.name = 'nacelleBoxyForePort'
+      port.position.set(center.x, center.y, foreZ + 0.01)
+      group.add(port)
+      break
+    }
+    case 'flat': {
+      const plate = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.6, h * 0.6, r * 0.08),
+        mat,
+      )
+      plate.name = 'nacelleBoxyForePlate'
+      plate.position.set(center.x, center.y, foreZ + r * 0.04)
+      group.add(plate)
+      break
+    }
+    case 'nozzle': {
+      const nozzle = new THREE.Mesh(
+        new THREE.CylinderGeometry(w * 0.25, w * 0.38, r * 0.25, 10),
+        mat,
+      )
+      nozzle.name = 'nacelleBoxyForeNozzle'
+      nozzle.rotation.x = Math.PI / 2
+      nozzle.position.set(center.x, center.y, foreZ + r * 0.12)
+      group.add(nozzle)
+      break
+    }
+    case 'slit': {
+      const slit = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.7, h * 0.06, r * 0.04),
+        glowMat,
+      )
+      slit.name = 'nacelleBoxyForeSlit'
+      slit.position.set(center.x, center.y, foreZ + 0.02)
+      group.add(slit)
+      break
+    }
+    case 'chevron': {
+      const armLen = Math.min(w, h) * 0.42
+      const armThick = Math.min(w, h) * 0.07
+      const armD = r * 0.04
+      const angle = 0.5
+      for (const sx of [-1, 1]) {
+        const arm = new THREE.Mesh(
+          new THREE.BoxGeometry(armThick, armLen, armD),
+          glowMat,
+        )
+        arm.name = 'nacelleBoxyForeChevron'
+        arm.position.set(
+          center.x + sx * Math.sin(angle) * armLen * 0.5,
+          center.y + Math.cos(angle) * armLen * 0.5,
+          foreZ + 0.02,
+        )
+        arm.rotation.z = sx * -angle
+        group.add(arm)
+      }
+      break
+    }
+    case 'dualPort': {
+      const portR = Math.min(w, h) * 0.2
+      const gap = w * 0.28
+      for (const sx of [-1, 1]) {
+        const port = new THREE.Mesh(
+          new THREE.CircleGeometry(portR, 12),
+          glowMat,
+        )
+        port.name = 'nacelleBoxyForeDualPort'
+        port.position.set(center.x + sx * gap, center.y, foreZ + 0.01)
+        group.add(port)
+      }
+      break
+    }
+    case 'lens': {
+      const lens = new THREE.Mesh(
+        new THREE.CircleGeometry(Math.min(w, h) * 0.25, 12),
+        glowMat,
+      )
+      lens.name = 'nacelleBoxyForeLens'
+      lens.scale.set(0.45, 1.5, 1)
+      lens.position.set(center.x, center.y, foreZ + 0.01)
+      group.add(lens)
+      break
+    }
+    case 'blade': {
+      const bladeW = w * 0.55
+      const bladeH = h * 0.72
+      const bladeD = r * 0.14
+      const blade = new THREE.Mesh(
+        new THREE.BoxGeometry(bladeW, bladeH, bladeD),
+        mat,
+      )
+      blade.name = 'nacelleBoxyForeBlade'
+      blade.position.set(center.x, center.y, foreZ + bladeD * 0.5)
+      group.add(blade)
+      const edgeW = bladeW * 0.75
+      const edgeH = bladeH * 0.04
+      const edge = new THREE.Mesh(
+        new THREE.BoxGeometry(edgeW, edgeH, bladeD * 0.3),
+        glowMat,
+      )
+      edge.name = 'nacelleBoxyForeBladeEdge'
+      edge.position.set(center.x, center.y, foreZ + bladeD + edgeH * 0.15)
+      group.add(edge)
+      break
+    }
+    case 'grille':
+    default: {
+      const nRow = 3
+      const nCol = 2
+      const dotR = Math.min(w, h) * 0.06
+      const geo = new THREE.CircleGeometry(dotR, 8)
+      for (let row = 0; row < nRow; row++) {
+        for (let col = 0; col < nCol; col++) {
+          const dot = new THREE.Mesh(geo, glowMat)
+          dot.name = 'nacelleBoxyForeGrille'
+          dot.position.set(
+            center.x + (col - 0.5) * w * 0.3,
+            center.y + (row - 1) * h * 0.2,
+            foreZ + 0.01,
+          )
+          group.add(dot)
+        }
+      }
+      break
+    }
+  }
+
+  // --- Aft cap (-Z face) ---
+  // Always has a glowing exhaust aperture; the style varies the surrounding
+  // hardware.
+  const aftCapStyle = rng.pick(['port', 'flared', 'vented', 'ring', 'quad', 'twin', 'slit', 'cross', 'panel'])
+  switch (aftCapStyle) {
+    case 'port': {
+      const port = new THREE.Mesh(
+        new THREE.CircleGeometry(Math.min(w, h) * 0.35, 12),
+        glowMat,
+      )
+      port.name = 'nacelleBoxyPort'
+      port.rotation.y = Math.PI
+      port.position.set(center.x, center.y, aftZ - 0.01)
+      group.add(port)
+      break
+    }
+    case 'flared': {
+      const flare = new THREE.Mesh(
+        new THREE.CylinderGeometry(w * 0.5, w * 0.35, r * 0.2, 8, 1, true),
+        mat,
+      )
+      flare.name = 'nacelleBoxyFlare'
+      flare.rotation.x = Math.PI / 2
+      flare.position.set(center.x, center.y, aftZ - r * 0.1)
+      group.add(flare)
+      const disc = new THREE.Mesh(
+        new THREE.CircleGeometry(w * 0.48, 12),
+        glowMat,
+      )
+      disc.name = 'nacelleBoxyFlareDisc'
+      disc.rotation.y = Math.PI
+      disc.position.set(center.x, center.y, aftZ - r * 0.2)
+      group.add(disc)
+      break
+    }
+    case 'vented': {
+      const cap = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.95, h * 0.95, r * 0.06),
+        mat,
+      )
+      cap.name = 'nacelleBoxyVentCap'
+      cap.position.set(center.x, center.y, aftZ - r * 0.03)
+      group.add(cap)
+      const nVent = 4
+      const ventR = Math.min(w, h) * 0.08
+      const ventGeo = new THREE.CircleGeometry(ventR, 8)
+      for (let k = 0; k < nVent; k++) {
+        const a = (k / nVent) * Math.PI * 2 + Math.PI / 4
+        const vent = new THREE.Mesh(ventGeo, glowMat)
+        vent.name = 'nacelleBoxyVent'
+        vent.rotation.y = Math.PI
+        vent.position.set(
+          center.x + Math.cos(a) * w * 0.3,
+          center.y + Math.sin(a) * h * 0.3,
+          aftZ - r * 0.07,
+        )
+        group.add(vent)
+      }
+      break
+    }
+    case 'ring': {
+      const ring = new THREE.Mesh(
+        new THREE.TorusGeometry(Math.min(w, h) * 0.35, Math.min(w, h) * 0.05, 8, 16),
+        glowMat,
+      )
+      ring.name = 'nacelleBoxyRing'
+      ring.position.set(center.x, center.y, aftZ - 0.01)
+      group.add(ring)
+      break
+    }
+    case 'twin': {
+      const portR = Math.min(w, h) * 0.19
+      const gap = w * 0.27
+      for (const sx of [-1, 1]) {
+        const port = new THREE.Mesh(
+          new THREE.CircleGeometry(portR, 12),
+          glowMat,
+        )
+        port.name = 'nacelleBoxyAftTwinPort'
+        port.rotation.y = Math.PI
+        port.position.set(center.x + sx * gap, center.y, aftZ - 0.01)
+        group.add(port)
+      }
+      break
+    }
+    case 'slit': {
+      const slit = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.07, h * 0.72, r * 0.04),
+        glowMat,
+      )
+      slit.name = 'nacelleBoxyAftSlit'
+      slit.position.set(center.x, center.y, aftZ - 0.02)
+      group.add(slit)
+      break
+    }
+    case 'cross': {
+      const hBar = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.62, h * 0.07, r * 0.04),
+        glowMat,
+      )
+      hBar.name = 'nacelleBoxyAftCrossH'
+      hBar.position.set(center.x, center.y, aftZ - 0.02)
+      group.add(hBar)
+      const vBar = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.07, h * 0.62, r * 0.04),
+        glowMat,
+      )
+      vBar.name = 'nacelleBoxyAftCrossV'
+      vBar.position.set(center.x, center.y, aftZ - 0.02)
+      group.add(vBar)
+      break
+    }
+    case 'panel': {
+      const panel = new THREE.Mesh(
+        new THREE.BoxGeometry(w * 0.85, h * 0.85, r * 0.04),
+        mat,
+      )
+      panel.name = 'nacelleBoxyAftPanel'
+      panel.position.set(center.x, center.y, aftZ - r * 0.02)
+      group.add(panel)
+      const nRow = 3
+      const nCol = 3
+      const dotR = Math.min(w, h) * 0.05
+      const dotGeo = new THREE.CircleGeometry(dotR, 8)
+      for (let row = 0; row < nRow; row++) {
+        for (let col = 0; col < nCol; col++) {
+          const dot = new THREE.Mesh(dotGeo, glowMat)
+          dot.name = 'nacelleBoxyAftPanelDot'
+          dot.rotation.y = Math.PI
+          dot.position.set(
+            center.x + (col - 1) * w * 0.22,
+            center.y + (row - 1) * h * 0.22,
+            aftZ - r * 0.05,
+          )
+          group.add(dot)
+        }
+      }
+      break
+    }
+    case 'quad':
+    default: {
+      const nPort = 4
+      const portR = Math.min(w, h) * 0.12
+      const portGeo = new THREE.CircleGeometry(portR, 10)
+      for (let k = 0; k < nPort; k++) {
+        const a = (k / nPort) * Math.PI * 2
+        const port = new THREE.Mesh(portGeo, glowMat)
+        port.name = 'nacelleBoxyQuadPort'
+        port.rotation.y = Math.PI
+        port.position.set(
+          center.x + Math.cos(a) * w * 0.25,
+          center.y + Math.sin(a) * h * 0.25,
+          aftZ - 0.01,
+        )
+        group.add(port)
+      }
+      break
+    }
+  }
 }
 
 // Build the nacelle pod body (+ fore nose if hasNose) at podCenter, aligned
@@ -1687,6 +2109,23 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
     thread.rotation.x = Math.PI / 2 // axis -> +Z
     thread.position.copy(center)
     group.add(thread)
+    return
+  }
+
+  if (type === 'cluster') {
+    buildNacelleCluster(group, center, r, len, mat, glowMat)
+    return
+  }
+
+  if (type === 'spindle' || type === 'spindleX' || type === 'spindleY') {
+    const axis = type === 'spindleX' ? 'x' : type === 'spindleY' ? 'y' : 'z'
+    buildNacelleSpindle(group, center, r, len, mat, glowMat, axis)
+    return
+  }
+
+  if (type === 'boxy') {
+    const bevelRng = createRng(i * PAIR_SEED_MULT + 104729)
+    buildNacelleBoxy(group, center, r, len, mat, glowMat, bevelRng)
     return
   }
 
@@ -3079,90 +3518,120 @@ function buildHangarPod(b) {
   return group
 }
 
-// Dock: a semi-cylindrical docking bay — a curved canopy (half-cylinder shell)
-// with an arched opening facing outboard. The interior back is an emissive disc
-// recessed inboard, and a glowing curved rim (torus segment) lines the opening's
-// edge. A few small emissive guide lights sit along the rim. `side` is +1
-// (starboard) or -1 (port); the opening faces outboard.
+// Dock: a docking gantry — an open frame structure that projects outboard from
+// the hull. Two vertical posts at the fore and aft of the opening, a crossbeam
+// spanning the top, a floor plate at the base, and glowing guide strips along
+// the top edge and floor. A recessed emissive back panel fills the interior.
+// `side` is +1 (starboard) or -1 (port); the opening faces outboard.
 function buildHangarDock(b) {
   const { mat, glowMat, w, h, d, z, cx, cy, side } = b
   const group = new THREE.Group()
   group.name = 'hangar:dock'
 
-  // The curved canopy: a half-cylinder (180° arc) with the axis along the
-  // inboard direction (X for side mounts). The open end faces outboard. The
-  // cylinder's Y-axis (default) is rotated to align with X.
-  const shellR = Math.min(h, d) * 0.45 // radius of the half-cylinder
-  const shellLen = w * 0.7 // inboard depth of the canopy
-  const shell = new THREE.Mesh(
-    new THREE.CylinderGeometry(shellR, shellR, shellLen, 24, 1, true, Math.PI, Math.PI),
+  // Dimensions: the gantry frame is slightly larger than the hangar cavity so
+  // it reads as a structural frame surrounding the opening.
+  const postW = w * 0.12
+  const postH = h * 1.1
+  const beamH = h * 0.1
+  const floorThick = w * 0.06
+  const frameOut = w * 0.55 // how far the frame extends outboard from the hull
+  const backRecess = w * 0.3
+
+  // Two vertical posts at the fore (+Z) and aft (-Z) of the opening.
+  for (const sz of [1, -1]) {
+    const post = new THREE.Mesh(
+      new THREE.BoxGeometry(frameOut, postH, postW),
+      mat,
+    )
+    post.name = 'dockPost'
+    post.position.set(
+      cx + side * frameOut * 0.5,
+      cy,
+      z + sz * d * 0.48,
+    )
+    group.add(post)
+  }
+
+  // Crossbeam spanning the top of the opening.
+  const beam = new THREE.Mesh(
+    new THREE.BoxGeometry(frameOut, beamH, d + postW),
     mat,
   )
-  shell.name = 'dockShell'
-  // Rotate so the cylinder's axis (Y) points along X (inboard direction).
-  // The half-cylinder's flat face (the diameter) faces down (-Y in local space),
-  // which maps to the hull surface after rotation.
-  shell.rotation.z = Math.PI / 2 // Y -> X
-  shell.rotation.x = Math.PI / 2 // so the flat face points toward the hull
-  shell.position.set(cx - side * shellLen * 0.5, cy, z)
-  group.add(shell)
+  beam.name = 'dockBeam'
+  beam.position.set(
+    cx + side * frameOut * 0.5,
+    cy + postH * 0.5 + beamH * 0.5,
+    z,
+  )
+  group.add(beam)
 
-  // The outboard face (opening) is at the outer end of the cylinder.
-  const outX = cx + side * (w * 0.5)
+  // Floor plate at the base of the gantry.
+  const floor = new THREE.Mesh(
+    new THREE.BoxGeometry(frameOut, floorThick, d + postW),
+    mat,
+  )
+  floor.name = 'dockFloor'
+  floor.position.set(
+    cx + side * frameOut * 0.5,
+    cy - postH * 0.5 - floorThick * 0.5,
+    z,
+  )
+  group.add(floor)
 
-  // The back of the bay (emissive): a disc recessed inboard, spanning the
-  // opening. This is the glowing "interior" seen through the arched void.
-  const backR = shellR * 0.85
-  const recess = w * 0.35
-  const back = new THREE.Mesh(new THREE.CircleGeometry(backR, 24), glowMat)
+  // Glowing guide strip along the top beam (outboard edge).
+  const topStrip = new THREE.Mesh(
+    new THREE.BoxGeometry(frameOut * 0.15, beamH * 0.4, d * 0.85),
+    glowMat,
+  )
+  topStrip.name = 'dockGuideTop'
+  topStrip.position.set(
+    cx + side * frameOut,
+    cy + postH * 0.5 + beamH * 0.5,
+    z,
+  )
+  group.add(topStrip)
+
+  // Glowing guide strip along the floor (outboard edge).
+  const botStrip = new THREE.Mesh(
+    new THREE.BoxGeometry(frameOut * 0.15, floorThick * 0.4, d * 0.85),
+    glowMat,
+  )
+  botStrip.name = 'dockGuideBot'
+  botStrip.position.set(
+    cx + side * frameOut,
+    cy - postH * 0.5 - floorThick * 0.5,
+    z,
+  )
+  group.add(botStrip)
+
+  // Recessed emissive back panel (the glowing interior seen through the
+  // gantry frame). Faces outboard.
+  const back = new THREE.Mesh(
+    new THREE.PlaneGeometry(d * 0.9, postH * 0.9),
+    glowMat,
+  )
   back.name = 'dockBack'
-  back.position.set(outX - side * recess, cy, z)
+  back.position.set(
+    cx + side * backRecess,
+    cy,
+    z,
+  )
   back.rotation.y = side === 1 ? Math.PI / 2 : -Math.PI / 2
   group.add(back)
 
-  // Fog volume: a semi-transparent cylinder filling the dock interior.
+  // Fog volume: a semi-transparent box filling the gantry interior.
   const fogMat = makeHangarFog(glowMat)
   const fog = new THREE.Mesh(
-    new THREE.CylinderGeometry(shellR * 0.8, shellR * 0.8, shellLen * 0.7, 16, 1, true),
+    new THREE.BoxGeometry(frameOut * 0.8, postH * 0.8, d * 0.8),
     fogMat,
   )
   fog.name = 'dockFog'
-  fog.rotation.z = Math.PI / 2
-  fog.rotation.x = Math.PI / 2
-  fog.position.set(cx - side * shellLen * 0.3, cy, z)
-  group.add(fog)
-
-  // A glowing curved rim (torus segment, 180°) lining the opening's edge.
-  const rimR = shellR
-  const rimTube = Math.min(h, d) * 0.035
-  const rim = new THREE.Mesh(
-    new THREE.TorusGeometry(rimR, rimTube, 10, 24, Math.PI),
-    glowMat,
+  fog.position.set(
+    cx + side * frameOut * 0.4,
+    cy,
+    z,
   )
-  rim.name = 'dockRim'
-  // The torus lies in the Y-Z plane by default; rotate so it faces outboard
-  // (perpendicular to X). The arc (Math.PI) covers the top half, matching
-  // the half-cylinder's opening.
-  rim.rotation.y = Math.PI / 2
-  rim.rotation.z = 0 // arc starts at 0 (right side) and sweeps to PI (left side)
-  rim.position.set(outX, cy, z)
-  group.add(rim)
-
-  // A few small emissive guide lights along the curved rim, spaced evenly
-  // across the 180° arc.
-  const lightR = rimTube * 0.6
-  const lightGeo = new THREE.SphereGeometry(lightR, 8, 6)
-  const lightCount = 5
-  for (let k = 0; k < lightCount; k++) {
-    const angle = (k / (lightCount - 1)) * Math.PI // 0 to PI across the arc
-    const lx = outX
-    const ly = cy + Math.sin(angle) * rimR
-    const lz = z - Math.cos(angle) * rimR
-    const light = new THREE.Mesh(lightGeo, glowMat)
-    light.name = 'dockGuideLight'
-    light.position.set(lx, ly, lz)
-    group.add(light)
-  }
+  group.add(fog)
 
   return group
 }
