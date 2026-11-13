@@ -791,7 +791,7 @@ function buildBridgeNose(rng, b) {
   visor.position.set(0, tipY + baseH * 0.7, tipZ + baseD * 0.45)
   group.add(visor)
 
-  const style = rng.pick(['strut', 'twin', 'hooded'])
+  const style = rng.pick(['strut', 'twin', 'hooded', 'cage', 'visor'])
 
   if (style === 'strut') {
     // Side struts: two angled supports connecting the base to the canopy.
@@ -832,6 +832,63 @@ function buildBridgeNose(rng, b) {
     rib.name = 'bridgeNoseRib'
     rib.position.set(0, tipY + baseH + h * 0.14, tipZ + d * 0.06)
     group.add(rib)
+  } else if (style === 'cage') {
+    // Faceted glass dome enclosed by 4 angular metal struts (geodesic cage).
+    const domeR = w * 0.28
+    const dome = new THREE.Mesh(makeTruncatedIcosahedron(domeR), glass)
+    dome.name = 'bridgeNoseCageDome'
+    dome.scale.set(
+      (baseW * 0.38) / domeR,
+      (h * 0.28) / domeR,
+      (d * 0.4) / domeR,
+    )
+    const domeY = tipY + baseH + h * 0.13
+    const domeZ = tipZ + d * 0.08
+    dome.position.set(0, domeY, domeZ)
+    group.add(dome)
+    // 4 angular struts from base rim to dome, offset 45° from the axes.
+    const strutW = w * 0.04
+    const strutH = h * 0.24
+    const strutD = d * 0.04
+    const strutRX = baseW * 0.28
+    const strutRZ = baseD * 0.22
+    for (let k = 0; k < 4; k++) {
+      const a = (k / 4) * Math.PI * 2 + Math.PI / 4
+      const strut = new THREE.Mesh(new THREE.BoxGeometry(strutW, strutH, strutD), mat)
+      strut.name = 'bridgeNoseCageStrut'
+      strut.position.set(
+        Math.cos(a) * strutRX,
+        tipY + baseH + strutH * 0.5,
+        domeZ + Math.sin(a) * strutRZ,
+      )
+      group.add(strut)
+    }
+  } else if (style === 'visor') {
+    // Deeply raked angular hood with a glass windshield + glowing visor slit.
+    const hoodW = w * 0.52
+    const hoodH = h * 0.28
+    const hoodD = d * 0.5
+    const hood = new THREE.Mesh(new THREE.BoxGeometry(hoodW, hoodH, hoodD), mat)
+    hood.name = 'bridgeNoseVisorHood'
+    hood.position.set(0, tipY + baseH + hoodH * 0.5, tipZ + hoodD * 0.15)
+    group.add(hood)
+    // Raked glass windshield on the forward face.
+    const wsW = hoodW * 0.75
+    const wsH = hoodH * 0.55
+    const wsD = d * 0.04
+    const ws = new THREE.Mesh(new THREE.BoxGeometry(wsW, wsH, wsD), glass)
+    ws.name = 'bridgeNoseVisorGlass'
+    ws.rotation.x = -0.35
+    ws.position.set(0, tipY + baseH + hoodH * 0.55, tipZ + hoodD * 0.55)
+    group.add(ws)
+    // Narrow glowing visor slit below the windshield.
+    const slitW = hoodW * 0.65
+    const slitH = h * 0.03
+    const slitD = d * 0.03
+    const slit = new THREE.Mesh(new THREE.BoxGeometry(slitW, slitH, slitD), glowMat)
+    slit.name = 'bridgeNoseVisorSlit'
+    slit.position.set(0, tipY + baseH + hoodH * 0.2, tipZ + hoodD * 0.48)
+    group.add(slit)
   } else {
     // Hooded: a single larger dome with a solid spine/deflector above it.
     const domeR = w * 0.3
@@ -1507,7 +1564,7 @@ function buildNacelle(rng, ctx) {
   // Per-pair sub-RNG: keyed on (shipSeed + instance index) so each pair (mirror
   // twins share the same i) gets consistent per-pair variation, while different
   // instances can differ. Keeps the mirror symmetric (same i → same values).
-  const pairRng = createRng((ctx.params._seed ?? 0) + i * PAIR_SEED_MULT)
+  const pairRng = createRng((ctx.seed ?? 0) + i * PAIR_SEED_MULT)
 
   // --- Placement (z, side offset, pod dimensions) depends on the mount --------
   let r, len, z, sideExtent, cy, hasStrut, hasNose
@@ -1629,7 +1686,7 @@ function buildNacelle(rng, ctx) {
   const podCenter = new THREE.Vector3(podCenterX, cy, z)
   // Aft pods (embedded in the stern) use the non-luminous mat for the dome
   // cap; other mounts alternate mat/glow per instance.
-  buildNacellePod(group, type, podCenter, r, len, hasNose, mat, glowMat, glowColor, i, mount === 'aft')
+  buildNacellePod(group, type, podCenter, r, len, hasNose, mat, glowMat, glowColor, i, mount === 'aft', ctx.seed ?? 0)
 
   // The pod's AFT end cap (distinct exhaust form per ship). Crystal pods have
   // their own pointed stern cap; fin/cluster/spindle/boxy have their own
@@ -1771,8 +1828,8 @@ function buildNacelleBoxy(group, center, r, len, mat, glowMat, rng) {
   // seeded rng so different boxy nacelles on the same ship can have different
   // cap styles. The cap sits on the face plane, centered at (center.x,
   // center.y).
-  const foreZ = center.z + len * 0.5
-  const aftZ = center.z - len * 0.5
+  const foreZ = center.z + len * 0.5 + bevel
+  const aftZ = center.z - len * 0.5 - bevel
   const capStyle = rng.pick(['port', 'flat', 'nozzle', 'slit', 'grille', 'chevron', 'dualPort', 'lens', 'blade'])
 
   // --- Fore cap (+Z face) ---
@@ -2072,7 +2129,7 @@ function buildNacelleBoxy(group, center, r, len, mat, glowMat, rng) {
 // Build the nacelle pod body (+ fore nose if hasNose) at podCenter, aligned
 // along +Z. `type` selects the body geometry: 'standard' (tapered cylinder +
 // domed nose) or 'crystal' (faceted hexagonal prism + pointed caps).
-function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glowColor, i, forceMat = false) {
+function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glowColor, i, forceMat = false, seed = 0) {
   if (type === 'crystal') {
     // Faceted hexagonal prism (crystal glass) with pointed caps at both ends.
     const crystalGlass = crystalGlassMaterial(glowColor)
@@ -2124,7 +2181,7 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
   }
 
   if (type === 'boxy') {
-    const bevelRng = createRng(i * PAIR_SEED_MULT + 104729)
+    const bevelRng = createRng(seed + i * PAIR_SEED_MULT + 104729)
     buildNacelleBoxy(group, center, r, len, mat, glowMat, bevelRng)
     return
   }
@@ -3742,12 +3799,12 @@ export const MODULE_CATALOG = {
 export function generateModules(
   params = {},
   hullInfo = {},
-  { material = null, hullGroup = null, color = null, glowColor = null, accent = null } = {}
+  { material = null, hullGroup = null, color = null, glowColor = null, accent = null, seed = 0 } = {}
 ) {
   const group = new THREE.Group()
   group.name = 'modules'
 
-  const rng = createRng(params._seed ?? 0)
+  const rng = createRng(seed)
   const beam = hullInfo.beam ?? DEFAULT_BEAM
   const height = hullInfo.height ?? DEFAULT_HEIGHT
   const length = hullInfo.length ?? DEFAULT_LENGTH
@@ -3801,7 +3858,7 @@ export function generateModules(
   )
 
   const density = clamp(params.density ?? 0.5, 0, 1)
-  const ctxBase = { mat, glowMat, hull, top, bottom, port, starboard, fore, aft, params, surface, glowColor, color, accent }
+  const ctxBase = { mat, glowMat, hull, top, bottom, port, starboard, fore, aft, params, surface, glowColor, color, accent, seed }
 
   // Strong-symmetry bias: paired modules are built as a single "half" group and
   // then mirrored across the hull centreline (X) to their port twin. Modules
