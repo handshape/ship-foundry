@@ -7,14 +7,21 @@ dedicated harness pages, saved to browser storage, and exported as GLTF/GLB.
 - Ships are **frigates and larger**, with their **forward axis on +Z** and origin
   at the ship's center.
 - **9 hull archetypes** built from genuinely different base geometries (lofted
-  slabs, lenticular saucers, solids-of-revolution discs, wedges, segmented
-  arthropods, twin-tube composites).
-- A variety of **design aesthetics** (original design languages inspired by
-  popular sci-fi universes — not trademarked assets).
-- **Procedurally generated textures** (canvas-based, baked into the export).
+  slabs, lenticular saucers, solids of revolution, wedges, segmented arthropods,
+  twin-tube composites).
+- **8 original design aesthetics** (design languages inspired by popular sci-fi
+  universes — not trademarked assets) that parameterize hull, modules, and
+  texture within per-language ranges.
+- **Rich superstructure**: 5 bridge styles, 7 nacelle body types with pylon / aft /
+  waist mounts, 12 weapon styles, command spikes, sensor masts, antennas, and
+  hangars.
+- **Procedurally generated textures** (canvas-based PBR maps — albedo, roughness,
+  metalness, normal, AO, emissive — with clearcoat paint, glowing window lights,
+  and Lucide-icon emblems; baked into the export).
 - **IndexedDB** persistence for ships and presets.
 - Ships are **deterministic**: the same config + seed always reproduces the same
-  ship (all randomness is seeded; no `Math.random` in the generator).
+  ship (all randomness is seeded; no `Math.random` in the generator). A specific
+  ship can be reproduced from the URL alone: `?seed=N&?aesthetic=X`.
 - **MIT** licensed.
 
 ## Stack
@@ -36,9 +43,11 @@ npm install
 npm run dev        # start the dev server (http://localhost:5173)
 ```
 
-Open http://localhost:5173 — the main app loads with a placeholder ship. Hit
-**Randomize** to roll a new ship, or pick a design language from the aesthetic
-selector to re-roll the hull/modules/texture within that language's ranges.
+Open http://localhost:5173 — the main app loads with the current working ship.
+Hit **Randomize** to roll a new ship, or pick a design language from the aesthetic
+selector to re-roll the hull/modules/texture within that language's ranges. You
+can also boot a specific ship from the URL: `?seed=N` (optionally
+`&aesthetic=<id>`).
 
 Other scripts:
 
@@ -54,34 +63,38 @@ npm run lint       # eslint
 
 Everything is derived from one plain-JSON `ShipConfig` + a seed. The ship is
 never stored as geometry — it is always regenerated from config, so a saved ship
-round-trips perfectly.
+round-trips perfectly. The **new-ship step** (roll a config from the schema,
+resolve the aesthetic's parameter ranges) happens once, in the UI; the spine
+(`generateShip`) is a pure function of `config` + `seed` and never re-resolves
+the aesthetic.
 
 ```mermaid
 flowchart TD
+    NEW["<b>new-ship step</b> (one-time, UI)<br/>randomConfig(seed) + randomAestheticId(rng)<br/>+ randomPalette(rng) + applyAesthetic(id, raw, rng)"]
     CFG["<b>ShipConfig</b> (plain JSON)<br/>{ seed, aesthetic, hull, modules, texture }"]
-    SPINE["generateShip(config, seed)<br/><i>src/core/generator/index.js</i>"]
+    SPINE["generateShip(config, seed?)<br/><i>src/core/generator/index.js</i>"]
 
-    subgraph BUILD ["deterministic spine"]
+    subgraph BUILD ["deterministic spine (pure)"]
         NORM["normalizeConfig<br/>(clamp + defaults)"]
-        AESTH["applyAesthetic<br/>(id → param ranges)"]
         HULL["generateHull<br/><i>hull.js</i>"]
-        TEX["generateTextures<br/><i>textures/index.js</i>"]
+        TEX["generateTextures<br/><i>textures/index.js</i><br/>albedo/roughness/metalness/<br/>normal/AO/emissive maps"]
+        MAT["createShipMaterial ×2<br/>hull: emissive window map<br/>module: no emissive"]
         MODS["generateModules<br/><i>modules.js</i>"]
     end
 
-    SCENE["THREE.Group <b>ship</b> (+Z forward,<br/>origin at center)<br/>├─ hull (Mesh, shared PBR material)<br/>└─ modules (Group; Mesh or InstancedMesh)"]
+    SCENE["THREE.Group <b>ship</b> (+Z forward,<br/>origin at center)<br/>├─ hull (Group of body meshes)<br/>└─ modules (Group of module parts)"]
 
     VP["viewport render<br/><i>core/three/scene.js</i><br/>setShip() disposes old group"]
     EXPORT["export / persist<br/>(a) exportGLTF → GLB/GLTF<br/>(b) storage.saveShip → IndexedDB"]
 
+    NEW --> CFG
     CFG --> SPINE
     SPINE --> NORM
-    NORM --> AESTH
-    AESTH --> HULL
-    AESTH --> TEX
-    AESTH --> MODS
+    NORM --> HULL
+    HULL --> MAT
+    TEX --> MAT
+    MAT --> MODS
     HULL --> SCENE
-    TEX --> SCENE
     MODS --> SCENE
     SCENE --> VP
     SCENE --> EXPORT
@@ -89,7 +102,7 @@ flowchart TD
 
 The same `generateShip(config, seed)` is the single code path for the main app,
 every harness preview, export, and reload. Determinism is therefore guaranteed
-everywhere at once (see [ARCHITECTURE.md §6](docs/ARCHITECTURE.md#6-determinism-no-mathrandom-and-the-performance-budget-sp-11)).
+everywhere at once (see [ARCHITECTURE.md §6](docs/ARCHITECTURE.md#6-determinism-no-mathrandom-and-performance)).
 
 ### Hull archetypes
 
@@ -111,8 +124,6 @@ flowchart LR
     GEN --> INSECT["insect<br/>chain of overlapping ellipsoid segments"]
     GEN --> TWIN["twin<br/>two parallel tubes + crossbeam"]
 ```
-
-### The 9 hull archetypes
 
 | Archetype     | Base geometry                                            | Character                              |
 | ------------- | -------------------------------------------------------- | -------------------------------------- |
@@ -151,7 +162,7 @@ resolved from the aesthetic's parameter **ranges** via the seeded rng.
 | `#/harness`       | index of all tuning harnesses                     |
 | `#/harness/:id`   | a single tuning harness (e.g. `#/harness/hull`)   |
 
-### The 5 harnesses
+### The 6 harnesses
 
 Each harness isolates one aspect of the generator, with a live preview and a
 save-to-config path:
@@ -159,8 +170,9 @@ save-to-config path:
 | `:id`       | Harness    | What it tunes                                            |
 | ----------- | ---------- | -------------------------------------------------------- |
 | `hull`      | Hull       | hull geometry (archetype, length, beam, tapers, sections) |
-| `modules`   | Modules    | the superstructure (density + per-module counts/sizes)   |
-| `textures`  | Textures   | procedural surface (palette, panel lines, greebles, wear, stripes, emblem, size) |
+| `modules`   | Modules    | the superstructure (density + per-module counts/sizes/styles) |
+| `textures`  | Textures   | procedural surface (palette, panel lines, greebles, wear, stripes, emblem, windows, size) |
+| `weapons`   | Weapons    | an isolated single-weapon style browser (12 styles × positions), rendered on a mount block |
 | `aesthetics`| Aesthetics | pick a design language; re-rolls hull/modules/texture within its ranges |
 | `export`    | Export     | export the live ship as GLB or GLTF, or copy the config JSON |
 
@@ -180,9 +192,6 @@ save-to-config path:
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md)** — data flow, the `ShipConfig`
   model, module map, +Z convention, persistence, the harness pattern, and how to
   add a new aspect or a new harness.
-- **[PLAN.md](docs/PLAN.md)** — the meta-plan: invariants, sub-plans, and the
-  locked stack.
-- **[plans/](docs/plans/)** — per-sub-plan detail.
 
 ## License
 

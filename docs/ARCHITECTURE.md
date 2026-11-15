@@ -4,9 +4,6 @@ A guide to how Ship Foundry works end to end: the data flow, the canonical
 config model, the module map, the +Z convention, persistence, the harness
 pattern, and how to extend the generator (a new aspect) or add a new harness.
 
-Read this after [`PLAN.md`](./PLAN.md) (the meta-plan: invariants, sub-plans,
-and the locked stack).
-
 ---
 
 ## 1. The data flow
@@ -15,43 +12,59 @@ Everything is derived from one plain-JSON `ShipConfig` + a seed. The ship is
 never stored as geometry — it is always regenerated from config, so a saved ship
 round-trips perfectly.
 
+There are two distinct stages:
+
+- **The new-ship step** (one-time, UI-side): roll a raw config from the schema,
+  pick a design language, resolve its parameter ranges to concrete values, and
+  store the result. This is what the Randomize button, the aesthetic picker, the
+  `?seed=`/`?aesthetic=` URL boot, and the aesthetics harness all do.
+- **The spine** (`generateShip`): a PURE function of `config` + `seed`. It
+  renders the config it is given and never re-resolves the aesthetic, so manual
+  edits to the working config survive regeneration.
+
 ```
-                 ┌─────────────────────────────────────────────────────────┐
-                 │                       ShipConfig                         │
-                 │  { seed, aesthetic, hull{}, modules{}, texture{} }        │
-                 │  (plain JSON — the single source of truth)               │
-                 └───────────────┬─────────────────────────────────────────┘
-                                 │
-                                 ▼
-              generateShip(config, seed)        src/core/generator/index.js
-                                 │
-     ┌───────────────┬───────────┼──────────────┬─────────────────┐
-     ▼               ▼           ▼              ▼                 ▼
- normalizeConfig  applyAesthetic  generateHull  generateTextures  generateModules
- (clamp+defaults) (aesthetic id   (hull.js:     (textures:        (modules.js:
-                    -> params)      lofted        CanvasTexture     superstructure)
-                    SP-07           geometry +    albedo + PBR      SP-05)
-                    SP-02           anchors)      maps)             SP-05
-                                  SP-04         SP-06
-     └───────────────┴───────────┬──────────────┴─────────────────┘
-                                 ▼
-                     THREE.Group  (name = "ship", +Z forward, origin at center)
-                     ├─ hull (Mesh, shared PBR material)
-                     └─ modules (Group; per-module Mesh or InstancedMesh)
-                                 │
-                 ┌───────────────┴───────────────┐
-                 ▼                               ▼
-        viewport render                     export / persist
-        (core/three/scene.js)               (a) exportGLTF -> GLB/GLTF
-        setShip() disposes the old group    (b) storage.saveShip(record)
-        and reframes the camera              -> IndexedDB (ShipRecord)
-                 │
-                 ▼
-        render loop (requestAnimationFrame)
+ New-ship step (one-time):
+   rng = createRng(seed)
+   raw = randomConfig(seed)                    # every leaf drawn from the schema
+   raw.aesthetic = randomAestheticId(rng)      # varied design language
+   raw.texture.palette = randomPalette(rng)    # desaturated base + derived tones
+   cfg = normalizeConfig(applyAesthetic(id, raw, rng))
+                  ┌─────────────────────────────────────────────────────────┐
+                  │                       ShipConfig                        │
+                  │  { seed, aesthetic, hull{}, modules{}, texture{} }       │
+                  │  (plain JSON — the single source of truth)               │
+                  └───────────────┬─────────────────────────────────────────┘
+                                  │
+                                  ▼
+              generateShip(config, seed?)       src/core/generator/index.js
+                                  │
+      ┌───────────────┬───────────┼──────────────────┬─────────────────┐
+      ▼               ▼           ▼                  ▼                 ▼
+  normalizeConfig  generateHull  generateTextures  two materials    generateModules
+  (clamp+defaults) (hull.js:     (textures:        hull:   MeshPhysicalMaterial
+                     9 archetypes + canvas maps:   with the emissive
+                     + anchors)      albedo, roughness, (window-light) map;
+                                     metalness, normal, module: same maps, no
+                                     AO, emissive)      emissive
+      └───────────────┴───────────┴──────────────────┴─────────────────┘
+                                  ▼
+                      THREE.Group (name = "ship", +Z forward, origin at center)
+                      ├─ hull (Group of 1..N body meshes, hull material)
+                      └─ modules (Group; per-module multi-part meshes)
+                                  │
+                  ┌───────────────┴───────────────┐
+                  ▼                               ▼
+         viewport render                     export / persist
+         (core/three/scene.js)               (a) exportGLTF -> GLB/GLTF
+         setShip() disposes the old group    (b) storage.saveShip(record)
+         and reframes the camera              -> IndexedDB (ShipRecord)
+                  │
+                  ▼
+         render loop (requestAnimationFrame)
 
  Loading a saved ship:
-   read ShipRecord -> generateShip(record.config, record.config.seed) -> render
-   (thumbnail + stats are caches only; config + seed are the source of truth)
+    read ShipRecord -> generateShip(record.config, record.config.seed) -> render
+    (thumbnail + stats are caches only; config + seed are the source of truth)
 ```
 
 The same `generateShip(config, seed)` is the single code path for: the main
@@ -65,61 +78,80 @@ guaranteed everywhere at once (see §6).
 `ShipConfig` is one plain-JSON object (`src/core/generator/config.js`). Each
 aspect owns exactly **one** sub-object and is responsible for its fields,
 defaults, ranges, and the builder that consumes them. The schema
-(`SHIP_CONFIG_SCHEMA`) is the single source of truth: `normalizeConfig`,
-`validateConfig`, and `randomFromSchema` are all driven by it, so adding a
-field is all an aspect needs to make it defaultable, clamped, validatable, and
-randomizable.
+(`SHIP_CONFIG_SCHEMA`) is the single source of truth: `normalizeConfig` and
+`randomFromSchema` are both driven by it, so adding a field is all an aspect
+needs to make it defaultable, clamped, and randomizable.
 
-| Field        | Type    | Owner  | Consumed by                                   |
-| ------------ | ------- | ------ | --------------------------------------------- |
-| `seed`       | number  | SP-02  | `createRng` (all randomness flows from here)  |
-| `aesthetic`  | string  | SP-07  | `applyAesthetic` (id into `AESTHETICS`)       |
-| `hull`       | object  | SP-04  | `generateHull` (hull-body system: lofted / disc / wedge / segmented / composite) |
-| `modules`    | object  | SP-05  | `generateModules` (superstructure)            |
-| `texture`    | object  | SP-06  | `generateTextures` (procedural surface maps)  |
+| Field       | Type   | Owner      | Consumed by                                   |
+| ----------- | ------ | ---------- | --------------------------------------------- |
+| `seed`      | number | spine      | `createRng` (all randomness flows from here)  |
+| `aesthetic` | string | aesthetics | `applyAesthetic` (id into `AESTHETICS`)       |
+| `hull`      | object | hull       | `generateHull` (9 archetypes)                 |
+| `modules`   | object | modules    | `generateModules` (superstructure)            |
+| `texture`   | object | textures   | `generateTextures` (procedural surface maps)  |
 
 ```js
 {
-  seed: 12345,                 // SP-02
-  aesthetic: 'hardpoint',      // SP-07 (id into AESTHETICS)
-  hull: {                      // SP-04 — geometry
-    archetype, length, beam, height, crossSection,
+  seed: 12345,                 // drives createRng
+  aesthetic: 'hardpoint',      // id into AESTHETICS (design language)
+  hull: {                      // geometry
+    archetype,                 // 9 archetypes (see §4)
+    length, beam, height,
+    crossSection,              // hex | ellipse | diamond | octagon
     noseTaper, sternTaper, deckOffset, keelOffset, chamfer, stations,
+    discUpperCurve, discLowerCurve, discEdge,   // disc archetype only
   },
-  modules: {                   // SP-05 — superstructure
+  modules: {                   // superstructure
     density,
-    bridge:        { enabled, size },
-    commandSpike:  { enabled, height },
-    nacelles:      { enabled, count, size },
-    engineBlocks:  { enabled, count, size },
-    weapons:       { enabled, count, size },
-    sensorMast:    { enabled, count, height },
-    antenna:       { enabled, count },
-    hangar:        { enabled, count },
+    bridge:       { enabled, size, style, position },
+    commandSpike: { enabled, height, style },
+    nacelles:     { enabled, mount, type, count, size, strut, lift, angle, tail },
+    weapons:      { enabled, count, size, style, position },
+    sensorMast:   { enabled, count, height, style },
+    antenna:      { enabled, count, style },
+    hangar:       { enabled, count, style, position },
   },
-  texture: {                   // SP-06 — procedural surface
+  texture: {                   // procedural surface
     palette: [base, secondary, accent, glow],
     panelLines: { enabled, weight },
     greebles:   { enabled, density },
     wear:       { enabled, amount },
     stripes:    { enabled, count, width },
     emblem:     { enabled, style },
+    windows:    { enabled, density },
     size,                      // texture resolution (px), 64..2048
   },
 }
 ```
+
+Notes on the module fields:
+
+- **nacelles** are the ship's propulsion pods, with a single mount layout per
+  ship: `mount` = `pylon` (long pods on struts off the flank) | `aft` (stubby
+  pods at the stern) | `waist` (pods on the hull's waist); `type` = one of 7
+  body forms (standard, crystal, cluster, spindle, spindleX, spindleY, boxy);
+  `strut` (forward/straight/aft sweep), `lift` (height off the centreline),
+  `angle` (up/level/down pitch), and `tail` (dome/point/scallop/flared/vented/
+  cowled exhaust form) complete the layout. The old separate `engineBlocks`
+  system was folded into this.
+- Each other module block has a `style` choice (e.g. 5 bridge styles, 12 weapon
+  styles) and, where it makes sense, a `position` (where on the hull it sits)
+  plus a bounded `count`.
 
 Because the whole config is plain JSON, it persists to IndexedDB and round-trips
 through the harnesses with **no serialization code**. `normalizeConfig` fills
 missing fields with schema defaults and clamps out-of-range values, so any
 partial config (e.g. a harness patch) becomes a complete, in-range config.
 
-The **aesthetic** is a design *language* (SP-07) that *parameterizes* the other
-three aspects. `applyAesthetic(id, config, rng)` resolves the aesthetic's
-parameter **ranges** to concrete values via the seeded `rng` and merges them over
-`hull` / `modules` / `texture`, then the spine re-normalizes. Different seeds give
-variety *within* an aesthetic while the resolved config always stays inside the
-schema bounds.
+The **aesthetic** is a design *language* that *parameterizes* the other three
+aspects. `applyAesthetic(id, config, rng)` resolves the aesthetic's parameter
+**ranges** to concrete values via the seeded `rng` and merges them over
+`hull` / `modules` / `texture`. It is a one-time "new ship" step — the spine
+never re-resolves it. Different seeds give variety *within* an aesthetic while
+the resolved config always stays inside the schema bounds. Range descriptors in
+`src/core/aesthetics/index.js`: `N(min, max)` number range, `C(options)`
+choice, `B(p)` boolean with probability, `P(options)` palette, `M(children)`
+nested object.
 
 ---
 
@@ -137,42 +169,43 @@ src/
   ui/
     icons.js              refreshIcons() -> lucide createIcons()
   views/
-    main.js               main application view (SP-08)
+    main.js               main application view (viewport, controls, save, export)
   core/
     three/
-      scene.js            createViewport / frameToObject; +Z convention (SP-01)
+      scene.js            createViewport / frameToObject; +Z convention
       exporter.js         exportGLTF / exportAndDownload (GLTFExporter)
     generator/
-      index.js            generateShip / randomConfig / disposeGroup (SP-02 spine)
-      config.js           ShipConfig schema + normalize/validate/random/clone (SP-02)
-      rng.js              createRng seeded PRNG (SP-02)
-      hull.js             generateHull (SP-04)
-      modules.js          generateModules + InstancedMesh budget (SP-05, SP-11)
+      index.js            generateShip / randomConfig / disposeGroup (the spine)
+      config.js           ShipConfig schema + normalize/random/clone + palette helpers
+      rng.js              createRng seeded PRNG (xorshift32)
+      hull.js             generateHull (9 archetypes) + shared hull constants
+      modules.js          generateModules + MODULE_CATALOG + module style constants
       placeholder.js      static scaffold ship (compare mode)
     aesthetics/
-      index.js            AESTHETICS registry + applyAesthetic (SP-07)
+      index.js            AESTHETICS registry + applyAesthetic (8 design languages)
     textures/
-      index.js            generateTextures / createShipMaterial (SP-06)
+      index.js            generateTextures / createShipMaterial (canvas PBR maps)
   persistence/
     db.js                 IndexedDB wrapper (ships + presets stores) + migrations
-    record.js             ShipRecord shape, shipStats, captureThumbnail (SP-03)
-    storage.js            saveShip/loadShip/listShips/deleteShip + presets (SP-03)
+    record.js             ShipRecord shape, shipStats, captureThumbnail
+    storage.js            saveShip/loadShip/listShips/deleteShip + presets
   harness/
-    framework.js          registerHarness / runHarness / harnessIndexView (SP-09)
+    framework.js          registerHarness / runHarness / harnessIndexView
     controls.js           schema-driven DaisyUI controls (paramControls, ...)
     index.js              imports each harness (side-effect registration)
-    hull.js               hull harness        (SP-10)
-    modules.js            modules harness     (SP-10)
-    textures.js           texture harness     (SP-10)
-    aesthetics.js         aesthetic harness   (SP-10)
-    export.js             export harness      (SP-10)
+    hull.js               hull harness
+    modules.js            modules harness
+    textures.js           texture harness
+    weapons.js            weapons harness (ownsPreview: isolated style browser)
+    aesthetics.js         aesthetic harness
+    export.js             export harness
 ```
 
 ---
 
 ## 4. The +Z convention
 
-Global and non-negotiable (PLAN §3 invariant 1):
+Global and non-negotiable:
 
 - A ship's **forward axis is +Z**; the nose is at +Z, the stern at −Z.
 - A ship's **origin is its center** (the hull spans `z ∈ [−L/2, +L/2]`).
@@ -184,14 +217,17 @@ Global and non-negotiable (PLAN §3 invariant 1):
 `generateHull` returns a `THREE.Group` of one or more hull-body meshes. Each
 archetype is built from actually different base geometries — lofted
 cross-sections (`blocky`/`sleek`/`lance`/`dreadnought`, each with its own taper
-curve), a lenticular **disc** + dome (`saucer`), a pointed-bow **wedge**
-(`wedge`), a chain of overlapping ellipsoid **segments** (`insect`), and a
-**composite** of two tubes + a crossbeam (`twin`). Lofted/wedge bodies run s=0
-at the stern (−Z) to s=1 at the nose (+Z) and cap both ends with outward-wound
-fans (so backface culling keeps them visible). All bodies fit the
-length/beam/height envelope. Modules are placed relative to `hullInfo` anchors
-(`top`, `bottom`, `port`, `starboard`, `fore`, `aft`) in the same hull-local
-space, and the spine assigns the shared texture material to every hull mesh.
+curve), a lenticular **disc** + dome (`saucer`), a **solid of revolution**
+(`disc`, LatheGeometry profile revolved and aligned to Z, with configurable
+convex/concave upper/lower curves and a cylinder or frustum edge), a pointed-bow
+**wedge** (`wedge`), a chain of overlapping ellipsoid **segments** (`insect`),
+and a **composite** of two tubes + a crossbeam (`twin`). Lofted/wedge bodies run
+s=0 at the stern (−Z) to s=1 at the nose (+Z) and cap both ends with
+outward-wound fans (so backface culling keeps them visible). All bodies fit the
+length/beam/height envelope. `generateHull` also returns `hullInfo` with the
+anchors (`top`, `bottom`, `port`, `starboard`, `fore`, `aft`) used to seat
+superstructure in the same hull-local space; the spine assigns the hull material
+to every hull mesh.
 
 ---
 
@@ -204,10 +240,10 @@ All persistence is in browser storage (IndexedDB) — no backend, no network.
 A thin wrapper around `indexedDB` opens one database (`ship-foundry`) with two
 object stores, each keyed by `id`:
 
-| Store     | Contents                       |
-| --------- | ------------------------------ |
-| `ships`   | saved `ShipRecord`s            |
-| `presets` | named config presets (harnesses) |
+| Store     | Contents                          |
+| --------- | --------------------------------- |
+| `ships`   | saved `ShipRecord`s               |
+| `presets` | named config presets (harnesses)  |
 
 **Two-level versioning:**
 
@@ -237,9 +273,11 @@ ship. `thumbnail` and `stats` are caches only — if they're missing or stale th
 app regenerates them; they are never required for correctness.
 
 `shipStats(config)` derives `{ className, hullArchetype, moduleCount,
-textureSize }`. `moduleCount` sums the `count` of each enabled module block (or 1
-for modules without a count, like `bridge`/`commandSpike`), so it stays meaningful
-whether or not the modules are drawn as `InstancedMesh` (see §6).
+textureSize }`. `className` is a length bucket (frigate / destroyer / cruiser /
+battleship).
+`moduleCount` sums the `count` of each enabled module block (or 1 for modules
+without a count, like `bridge`/`commandSpike`), so it stays meaningful and
+independent of how the modules are drawn.
 
 ### Capturing a thumbnail
 
@@ -249,7 +287,7 @@ force-loses its context — so it never leaks a WebGL context.
 
 ---
 
-## 6. Determinism, no-`Math.random`, and the performance budget
+## 6. Determinism, no-`Math.random`, and performance
 
 ### Determinism + seeded RNG
 
@@ -265,45 +303,42 @@ the only `Math.random` in the whole codebase is in the UI layer:
   `crypto.randomUUID` is unavailable (record metadata, not geometry).
 
 `generateShip(config, seed)` is therefore a pure function of its inputs: the same
-`config` + `seed` produces an identical ship (same node names, positions,
-instance matrices, and material colors) on every call, in every surface (main app,
-harnesses, export, reload). This was verified with a throwaway Node harness
-(generate twice and diff names / world positions / instance matrices / material
-colors) during SP-11.
+`config` + `seed` produces an identical ship (same node names, positions, and
+material colors) on every call, in every surface (main app, harnesses, export,
+reload). This is verified with a headless Node check (generate the same
+config+seed twice and diff node names / world positions / material colors).
 
-### Draw-call / geometry budget (SP-11)
+### Module geometry (no instancing)
 
-For frigate-and-larger ships the superstructure can contain many repeated
-"greeble-like" parts (weapon turrets, antenna whips, engine thruster rings, sensor
-masts). To keep the renderer fast, `generateModules`
-(`src/core/generator/modules.js`) draws the four repeatable modules —
-`engineBlocks`, `weapons`, `sensorMast`, `antenna` — as **one `THREE.InstancedMesh`
-per part** when their instance count exceeds `INSTANCING_THRESHOLD` (4); below it
-they fall back to individual meshes.
+The earlier `InstancedMesh` budgeting was dropped. Each module type is now a
+*family* of distinct multi-part, multi-style, multi-material variants (12 weapon
+styles, 7 nacelle body types, 5 bridge styles, 3 hangar styles, ...) — those
+don't batch into `InstancedMesh` the way a single repeated geometry did, and
+visual distinctness matters more than shaving draw calls. Every module is
+therefore drawn as individual meshes.
 
-- Each `InstancedMesh` keeps a name of the form `<module>:<part>` (e.g.
-  `engineBlocks:body`, `weapons:barrel`), so the module type stays identifiable.
-- Per-instance transforms are computed with the **same seeded `rng`, in the same
-  order**, as the individual-mesh path (a `transforms` mode in each builder), so
-  the instanced ship is byte-identical to the non-instanced one.
-- `shipStats.moduleCount` still reads correctly because it counts from the
-  config's `count` fields, not from the scene-graph child count.
-- `disposeGroup` / the viewport's `dispose` traverse and dispose every
-  `geometry` + `material`, which includes instanced meshes' shared geometry, so
-  instancing does not change teardown.
+Part counts stay small and bounded by the schema's `count` fields (weapons ≤ 8,
+nacelles ≤ 4, antennas ≤ 6, sensor masts ≤ 4, hangars ≤ 2), so the per-ship draw
+call count is modest and predictable. `shipStats.moduleCount` counts from the
+config's `count` fields, not from the scene-graph child count, so it reads
+correctly regardless.
 
-The net effect on a dense ship: instead of ~2 draw calls per engine block (body +
-thruster) × count, each part is a single instanced draw call regardless of count.
+### Materials and texture resolution
 
-### Texture resolution
+`generateTextures` sizes every `CanvasTexture` (albedo + roughness + metalness +
+normal + AO + emissive) from `texture.size` (64..2048, default 512) and the
+spine builds **two** `MeshPhysicalMaterial`s from the same maps:
 
-`texture.size` (64..2048, default 512) is respected directly by
-`generateTextures`: it sizes every `CanvasTexture` (albedo + roughness +
-metalness) and the PBR maps modulate the material. Viewport-scaled resolution is
-an optional future refinement; the config-driven `size` is the knob users (and
-the texture harness) control today, and it bakes cleanly into GLTF exports.
+- **hull material** — clearcoat (painted-ship look) and the emissive map, so
+  only the window lights (`texture.windows`) glow via the ship's single glow
+  colour (`palette[3]`); the rest of the hull stays dark.
+- **module material** — same PBR maps, no emissive map.
 
-### Dispose correctness / no WebGL leaks (PLAN §3 invariant 6)
+Every glowing part on the ship (window lights, engine/weapon/antenna glows, glass
+tints) shares the one emissive colour derived from `palette[3]`, so a ship's
+lights read as one coherent signature. The maps bake cleanly into GLTF exports.
+
+### Dispose correctness / no WebGL leaks
 
 Every view disposes its WebGL context on unmount via `app/cleanup.js`:
 
@@ -312,10 +347,9 @@ Every view disposes its WebGL context on unmount via `app/cleanup.js`:
   loop, disconnects the `ResizeObserver`, disposes the scene contents, calls
   `renderer.dispose()`, and **force-loses the WebGL context**.
 
-This was verified with a headless Chromium navigation stress test (SP-11):
-navigating main ↔ each of the 5 harnesses 20 times (120 navigations) kept the
-**live canvas / WebGL context count at exactly 1** at all times, with at most one
-context created per navigation — i.e. zero leaks.
+This was verified with a headless Chromium navigation stress test: navigating
+main ↔ every harness many times keeps the live canvas / WebGL context count at
+exactly 1 at all times — i.e. zero leaks.
 
 ---
 
@@ -350,18 +384,23 @@ Then import the file from `src/harness/index.js` (one line) so it registers.
 
 | Method / field      | Purpose                                                        |
 | ------------------- | -------------------------------------------------------------- |
-| `scene`             | the live preview `THREE.Scene`                                 |
-| `shipRoot`          | the current preview group (generated + placeholder)            |
-| `setShip(group)`    | replace the preview group (legacy hook)                        |
-| `refresh()`         | re-measure / re-frame the preview                               |
-| `getConfig()`       | the current working `ShipConfig` (a clone) from `appState`      |
-| `patchConfig(patch)`| deep-merge `patch` into the working config, normalize, regenerate the preview |
+| `shipRoot`          | the current preview group (holds generated + placeholder)      |
+| `getConfig()`       | the current working `ShipConfig` from `appState`               |
+| `patchConfig(patch)`| deep-merge `patch` into the working config, normalize, regenerate the preview (debounced) |
 | `saveConfig(name)`  | persist the working config as a **preset** + publish to `appState` so a later main-app load applies it |
 | `setCompare(on)`    | swap the preview between the generated ship and the placeholder |
 
 The preview regenerates live through the deterministic spine (`generateShip`),
-debounced so a slider drag re-frames smoothly. A header **Compare** checkbox swaps
-the preview between the generated ship and the static placeholder.
+debounced so a slider drag re-frames smoothly. A header **Compare** checkbox
+swaps the preview between the generated ship and the static placeholder.
+
+A harness may opt out of the default full-ship preview with
+`ownsPreview: true`: the framework then hands `build` a reduced API
+(`getConfig`, `patchConfig`, `saveConfig`, plus the raw `previewEl` DOM node)
+and the harness builds its own scene. The **weapons** harness uses this: it
+renders an isolated semitransparent block with a single weapon mounted on it, so
+the style catalog can be refined without the rest of the ship (a fixed seed keeps
+the preview deterministic).
 
 ### Save-to-config
 
@@ -375,8 +414,8 @@ The **export** harness is the exception that *reads* rather than *tunes*: it nev
 mutates the config, it only exports the live preview (GLB/GLTF) or copies the
 config JSON to the clipboard. The **aesthetics** harness is the one with an
 explicit "Save as custom preset" button (`api.saveConfig`); the hull / modules /
-textures harnesses rely on the shared `appState` working config + the main app's
-Save (which stores a full `ShipRecord`) as their save-to-config path.
+textures / weapons harnesses rely on the shared `appState` working config + the
+main app's Save (which stores a full `ShipRecord`) as their save-to-config path.
 
 ---
 
@@ -386,9 +425,9 @@ Save (which stores a full `ShipRecord`) as their save-to-config path.
 
 1. **Schema** — add the sub-object to `SHIP_CONFIG_SCHEMA` in
    `src/core/generator/config.js`. Each leaf uses one of the spec types
-   (`number`, `boolean`, `choice`, `string`, `palette`, `object`). This alone makes
-   it defaultable, clamped (`normalizeConfig`), validatable (`validateConfig`), and
-   randomizable (`randomFromSchema`).
+   (`number`, `boolean`, `choice`, `string`, `palette`, `object`). This alone
+   makes it defaultable, clamped (`normalizeConfig`), and randomizable
+   (`randomFromSchema`).
 2. **Builder** — add `generate<Aspect>(params, ...)` under `src/core/<aspect>/`
    (or a new directory) that consumes `params` and returns `THREE.Object3D` (or
    `material`/`texture`/`hullInfo` as appropriate). Use only the seeded `rng` —
