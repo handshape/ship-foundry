@@ -1,4 +1,6 @@
 import * as THREE from 'three'
+import { createRng } from './rng.js'
+import { SKIN_RINGS, SKIN_GIRTH, createSurface, tessellate, smoothDisplacementField } from './nurbs.js'
 
 // Default hull dimensions (the single source of truth, consumed by config.js
 // and modules.js as fallbacks).
@@ -8,14 +10,22 @@ export const DEFAULT_HEIGHT = 8
 
 // HULL GEOMETRY (SP-04) — hull-body system.
 //
-// Contract (unchanged — the spine, modules and harnesses rely on it):
-//   generateHull(hullParams) -> { group: THREE.Group, info: HullInfo }
-//   HullInfo = { length, beam, height, noseZ, sternZ, anchors, archetype, body }
+// Contract (the spine, modules and harnesses rely on it):
+//   generateHull(hullParams, { seed } = {}) -> { group: THREE.Group, info: HullInfo }
+//   HullInfo = { length, beam, height, noseZ, sternZ, anchors, archetype, body, freeform? }
 //   anchors  = { top, bottom, port, starboard, fore, aft }  // hull-local vectors
 //   - Forward = +Z, origin at hull center (fore at +Z, aft at -Z).
 //   - Anchor frame is right-handed: starboard=+X, top=+Y, fore=+Z.
 //   - `group` is a Group of one or more hull-body meshes. The spine assigns the
 //     shared texture material to every mesh in it (see core/generator/index.js).
+//   - `seed` is optional and only consumed by the skin archetypes (pod/slug/
+//     cluster/twinSkin/insectSkin) for their seeded wobble/meander/lobes.
+//     Non-skin archetypes consume nothing, so their geometry is unaffected by
+//     the seed.
+//   - `freeform` (optional, true for the skin archetypes) marks a hull whose
+//     cross-section is a freeform skin. modules.js uses the flag to answer
+//     surfaceRadiusAt from a per-z-bin angular sector table (origin-ray
+//     distances) instead of the elliptical half-extent formula.
 //
 // DESIGN — instead of one lofted tube for everything, each archetype is built
 // from *actually different* base geometries (primitives), and composites
@@ -41,11 +51,41 @@ export const HULL_ARCHETYPES = [
   'wedge',
   'insect',
   'twin',
+  // Skin archetypes: smooth, elastic-looking hulls defined by cubic B-spline
+  // (NURBS, unit weights) surfaces. See the skin builders below.
+  'pod',
+  'slug',
+  'cluster',
+  'twinSkin',
+  'insectSkin',
 ]
 export const HULL_SECTIONS = ['hex', 'ellipse', 'diamond', 'octagon']
 
+// The skin archetypes (B-spline surfaces). `generateHull` only creates the
+// seeded skinRng for these; all other archetypes are seed-independent.
+export const SKIN_ARCHETYPES = ['pod', 'slug', 'cluster', 'twinSkin', 'insectSkin']
+
 const MIN_SCALE = 0.03
 const MIN_PROFILE_PTS = 8
+
+// --- skin hull tuning (local to the skin builders) ----------------------------
+// SKIN_SEED_SALT: the skin rng is seeded from (shipSeed + salt), so the skin's
+// wobble sequence is independent of the module/textures rng stream.
+const SKIN_SEED_SALT = 0x534b494e // 'SKIN'
+// SKIN_CTRL_STATIONS: the number of LONGITUDINAL CONTROL RINGS in a skin cage.
+// (Tessellation density is the fixed SKIN_RINGS/SKIN_GIRTH from nurbs.js; the
+// control cage is coarser than the tessellation.)
+const SKIN_CTRL_STATIONS = 16
+// Invariant bounds (see the skin-builder invariants in the module doc): the
+// slug's section-center meander stays within this fraction of the local
+// half-height so the origin (0,0) remains inside every cross-section.
+const SLUG_MEANDER_MAX = 0.4
+// Radial wobble is bounded to this fraction of the local cage radius so the
+// surface cannot cross the axis (self-intersection).
+const SKIN_WOBBLE_MAX = 0.35
+// Lobe blob tessellation (cluster): sphere segments per lobe.
+const LOBE_SEGMENTS = 20
+const LOBE_RINGS = 14
 
 // Nose taper tuning (shared by the lofted body and the nose dome cap).
 const NOSE_TIP_RADIUS = 0.22 // full-nose tip radius (fraction of girth)
@@ -729,6 +769,480 @@ function buildTwin(params, profile, m, halfLen) {
   return g
 }
 
+// --- skin hulls (cubic B-spline / NURBS surfaces) -----------------------------
+//
+// SKIN-BUILDER INVARIANTS (preconditions for the freeform radial-sector
+// surface query in modules.js):
+//   1. Section centers at x = 0 (the slug may offset centers in Y only).
+//   2. |center.y| <= SLUG_MEANDER_MAX * local half-height — the origin (0,0)
+//      stays inside every cross-section, so the radial function from the
+//      origin is single-valued and every angular sector is populated.
+//   3. Radial wobble <= SKIN_WOBBLE_MAX * local cage radius — the surface
+//      stays away from the axis (no self-intersection; a uniform cubic
+//      B-spline stays within the per-patch convex hull).
+//
+// Shared setup: the base girth polygon is the existing buildProfile result, so
+// skins respect the configured `crossSection` and the periodic B-spline
+// naturally rounds hex/octagon/diamond into a smooth section. `stations` is
+// ignored by skins (tessellation density is the fixed SKIN_RINGS/SKIN_GIRTH).
+// The terminal control rings collapse toward a near-point (NOSE_TIP_MIN-style
+// floor) so the clamped B-spline skin closes smoothly at both ends.
+
+// Build the longitudinal length-scales for a skin (teardrop ovoid): full in
+// the middle, tapering toward both ends. Returns {sx, sy} per station s in
+// [0,1] (stern -> nose).
+function skinLengthScales(s, { noseTaper, sternTaper }) {
+  // Stern: ease from the stern tip radius up to full over the first ~35%.
+  const sternTip = lerp(0.18, 0.06, clamp(sternTaper, 0, 1))
+  let sx, sy
+  if (s < 0.5) {
+    const t = s / 0.5
+    const e = smoothstep(0, 1, t)
+    sx = lerp(sternTip, 1, e)
+    sy = lerp(sternTip * 1.15, 1, e)
+  } else {
+    // Fore: ease from full toward the nose tip over the final portion.
+    const noseTip = lerp(0.3, NOSE_TIP_MIN, clamp(noseTaper, 0, 1))
+    const t = (s - 0.5) / 0.5
+    const e = smoothstep(0, 1, t)
+    sx = lerp(1, noseTip, e)
+    sy = lerp(1, noseTip * 1.2, e)
+  }
+  return { sx: Math.max(MIN_SCALE, sx), sy: Math.max(MIN_SCALE, sy) }
+}
+
+// Build a [S][G] control cage for a pod/slug-style skin: the girth profile
+// (unit half-extents) scaled per station by the length curves, with optional
+// seeded radial wobble and (slug) Y-only section-center meander.
+//   profile : the buildProfile result (closed, start==end; m = length-1).
+//   rng     : the seeded skin rng (consumed in a fixed order: wobble field
+//             first, then the meander offsets).
+//   wobble  : 0..1 radial wobble amplitude (clamped to SKIN_WOBBLE_MAX).
+//   ripple  : the ripple frequency (integer) driving the wobble field.
+//   meander : 0..1 — slug only; Y-only section-center offset amplitude.
+// Returns a flat array of S rows, each an array of G THREE.Vector3 (G = m,
+// the seam column is implicit in the periodic B-spline, not duplicated).
+function buildSkinCage(profile, { beam, height, length, noseTaper, sternTaper, wobble, ripple, meander, rng }) {
+  const S = SKIN_CTRL_STATIONS
+  const m = profile.length - 1
+  const cage = []
+  // Seeded radial wobble field over the cage (fixed consumption: this field
+  // consumes the rng before anything else, in row-major order internally).
+  const field = smoothDisplacementField(S, m, rng, { freqU: 1, freqV: Math.max(2, ripple), waves: 3 })
+  // Slug Y-only meander: a few seeded control values along the length,
+  // smoothly interpolated (sampleCurve), clamped to the invariant bound.
+  const MEANDER_PTS = 5
+  const meanderVals = []
+  for (let k = 0; k < MEANDER_PTS; k++) meanderVals.push(rng.range(-1, 1))
+  const meanderCurve = meanderVals.map((v, k) => [k / (MEANDER_PTS - 1), v])
+  const wobbleAmp = clamp(wobble, 0, 1) * SKIN_WOBBLE_MAX
+  for (let si = 0; si < S; si++) {
+    const s = si / (S - 1)
+    const z = -length / 2 + s * length
+    const { sx, sy } = skinLengthScales(s, { noseTaper, sternTaper })
+    const localHalfH = height * 0.5 * sy
+    const cy = meander ? clamp(sampleCurve(meanderCurve, s), -1, 1) * meander * SLUG_MEANDER_MAX * localHalfH : 0
+    const row = []
+    for (let gi = 0; gi < m; gi++) {
+      const p = profile[gi]
+      // Local cage radius for this point (the bound for the wobble).
+      const w = wobbleAmp * field[si][gi] // bounded: |w| <= SKIN_WOBBLE_MAX
+      const x = p.x * beam * sx * (1 + w)
+      const y = p.y * height * sy * (1 + w) + cy
+      row.push(new THREE.Vector3(x, y, z))
+    }
+    cage.push(row)
+  }
+  // Collapse the terminal control rings toward a small near-point so the tip
+  // is narrow (the tessellator's flat cap then closes the small residual
+  // opening). The clamped cubic B-spline blends the first/last ~4 control
+  // rings, so a single collapsed ring still leaves a visible disc; collapsing
+  // the last 2 rings with a smooth ease to a small floor (NOSE_TIP_MIN) keeps
+  // the tip narrow enough that the cap is inconspicuous. The collapsed rings
+  // share the tip's z and y-center (the slug meander) so the tip follows the
+  // body's curve.
+  const TAPER_ZONE = 4
+  for (const end of [0, S - 1]) {
+    const zEnd = cage[end][0].z
+    const sEnd = end === 0 ? 0 : 1
+    const cyEnd = meander
+      ? clamp(sampleCurve(meanderCurve, sEnd), -1, 1) * meander * SLUG_MEANDER_MAX * (height * 0.5 * skinLengthScales(sEnd, { noseTaper, sternTaper }).sy)
+      : 0
+    const n = Math.min(TAPER_ZONE, S)
+    for (let k = 0; k < n; k++) {
+      // k = 0 is the terminal ring (fully collapsed to the tip floor), k = n-1
+      // is the outermost ring of the zone (least collapsed).
+      const ringIdx = end === 0 ? k : S - 1 - k
+      const ease = 1 - k / n // 1.0 (terminal) -> ~0.5 (outermost), for n=2
+      const shrink = lerp(1, NOSE_TIP_MIN, ease) // terminal -> NOSE_TIP_MIN
+      for (const p of cage[ringIdx]) {
+        p.x *= shrink
+        p.y = cyEnd + (p.y - cyEnd) * shrink
+        p.z = zEnd
+      }
+    }
+  }
+  return cage
+}
+
+// Pod: a plump teardrop ovoid — a NURBS skin lofted from a seeded,
+// undulating cross-section cage (clamped-longitudinal x periodic-girth).
+function buildPod(params, profile, rng) {
+  const { beam, height, length, noseTaper, sternTaper, skinWobble, skinRipple } = params
+  const cage = buildSkinCage(profile, {
+    beam, height, length, noseTaper, sternTaper,
+    wobble: skinWobble, ripple: skinRipple, meander: 0, rng,
+  })
+  const surface = createSurface(cage, { periodicV: true })
+  const geometry = tessellate(surface, { rings: SKIN_RINGS, girth: SKIN_GIRTH, caps: true })
+  const mesh = new THREE.Mesh(geometry)
+  mesh.name = 'hull:skin:pod'
+  const g = new THREE.Group()
+  g.name = 'hull'
+  g.add(mesh)
+  return g
+}
+
+// Slug: an elongated, undulating asymmetric skin. Section centers meander in
+// Y only (bounded so the origin stays inside every cross-section), and the
+// radial wobble makes the body writhe elastically while x=0 stays on the
+// surface at every z (centreline modules keep working).
+function buildSlug(params, profile, rng) {
+  const { beam, height, length, noseTaper, sternTaper, skinWobble, skinRipple } = params
+  const cage = buildSkinCage(profile, {
+    beam, height, length, noseTaper, sternTaper,
+    wobble: skinWobble, ripple: skinRipple, meander: 0.6, rng,
+  })
+  const surface = createSurface(cage, { periodicV: true })
+  const geometry = tessellate(surface, { rings: SKIN_RINGS, girth: SKIN_GIRTH, caps: true })
+  const mesh = new THREE.Mesh(geometry)
+  mesh.name = 'hull:skin:slug'
+  const g = new THREE.Group()
+  g.name = 'hull'
+  g.add(mesh)
+  return g
+}
+
+// A seeded smooth blob (a SphereGeometry with per-vertex smooth radial
+// displacement) used for the cluster's lobes.
+function buildLobe(rng, { r, smoothFreq = 2 }) {
+  const geo = new THREE.SphereGeometry(r, LOBE_SEGMENTS, LOBE_RINGS)
+  const pos = geo.attributes.position
+  // Seeded wave params (fixed consumption order): 3 waves, each (phU, phV,
+  // wgt). The displacement is a smooth function of the vertex direction so
+  // the blob stays smooth (no faceting) and deterministic.
+  const waves = []
+  for (let w = 0; w < 3; w++) {
+    waves.push({
+      phU: rng.range(0, Math.PI * 2),
+      phV: rng.range(0, Math.PI * 2),
+      wgt: rng.range(0.3, 1),
+    })
+  }
+  const v = new THREE.Vector3()
+  for (let i = 0; i < pos.count; i++) {
+    v.fromBufferAttribute(pos, i).normalize()
+    // Spherical angles of the unit direction.
+    const theta = Math.atan2(v.y, Math.hypot(v.x, v.z)) // -PI..PI
+    const phi = Math.acos(clamp(v.z / r, -1, 1)) // 0..PI (from +Z)
+    let sum = 0
+    let wsum = 0
+    for (const w of waves) {
+      sum += w.wgt * Math.sin(smoothFreq * theta + w.phU) * Math.sin(smoothFreq * phi + w.phV)
+      wsum += w.wgt
+    }
+    const disp = 1 + 0.25 * (sum / wsum) // bounded: +/-25% of r
+    pos.setXYZ(i, v.x * r * disp, v.y * r * disp, v.z * r * disp)
+  }
+  geo.computeVertexNormals()
+  return geo
+}
+
+// Cluster: a slimmer pod-style main skin + lobeCount seeded lobe blobs whose
+// bases sit slightly inside the main-skin surface so they fuse into it. The
+// main skin obeys the invariants; the lobes sit ON the surface (they may
+// bulge beyond the envelope, which the geometry-derived envelope captures).
+function buildCluster(params, profile, rng) {
+  const { beam, height, length, noseTaper, sternTaper, skinWobble, skinRipple, lobeCount, lobeSize } = params
+  // Main skin: slimmer (0.78 of the configured beam/height) so the lobes read
+  // as distinct bulges rather than the whole body.
+  const mainCage = buildSkinCage(profile, {
+    beam: beam * 0.78, height: height * 0.78, length, noseTaper, sternTaper,
+    wobble: skinWobble * 0.6, ripple: skinRipple, meander: 0, rng,
+  })
+  const mainSurface = createSurface(mainCage, { periodicV: true })
+  const mainGeo = tessellate(mainSurface, { rings: SKIN_RINGS, girth: SKIN_GIRTH })
+  const mainMesh = new THREE.Mesh(mainGeo)
+  mainMesh.name = 'hull:skin:cluster'
+  const g = new THREE.Group()
+  g.name = 'hull'
+  g.add(mainMesh)
+
+  // Lobes: fixed order (k = 0..lobeCount-1), each consuming rng in a fixed
+  // order (centerS, angle, depth, size, then the lobe displacement field).
+  const lobeRBase = Math.min(beam, height) * lobeSize
+  for (let k = 0; k < lobeCount; k++) {
+    // Seeded center: s (length fraction), girth angle, radial depth.
+    const sFrac = rng.range(-0.35, 0.35)
+    const angle = rng.range(0, Math.PI * 2)
+    const depth = rng.range(0.82, 0.95) // slightly inside the main-skin surface
+    const size = lobeRBase * rng.range(0.7, 1.3)
+    const cz = -length / 2 + (0.5 + sFrac) * length
+    // Main-skin radius at this station (approx: the cage's local scale).
+    const { sx, sy } = skinLengthScales(0.5 + sFrac, { noseTaper, sternTaper })
+    const localBeam = beam * 0.78 * sx
+    const localHeight = height * 0.78 * sy
+    // Radial distance of the main skin in the lobe's angle direction
+    // (ellipse-ish from the section scales).
+    const ca = Math.cos(angle)
+    const sa = Math.sin(angle)
+    const denom = (ca * ca) / (localBeam * localBeam) + (sa * sa) / (localHeight * localHeight)
+    const skinR = denom > 1e-9 ? 1 / Math.sqrt(denom) : localBeam
+    const cx = ca * skinR * depth
+    const cy = sa * skinR * depth
+    const lobeGeo = buildLobe(rng, { r: size })
+    const lobe = new THREE.Mesh(lobeGeo)
+    lobe.position.set(cx, cy, cz)
+    lobe.name = `hull:skin:lobe:${k}`
+    g.add(lobe)
+  }
+  return g
+}
+
+// twinSkin: a single smooth skin faired over the twin-tube silhouette. The
+// girth control polygon is derived from the shared TWIN_* constants (declared
+// earlier in this file): outer extents from the tube offset+beam, top/bottom
+// from the tube height, a shallow centerline waist groove from the crossbeam.
+function buildTwinSkin(params, rng) {
+  const { beam, height, length, skinWobble, skinRipple } = params
+  const G = 14 // girth control points
+  // Build the unit girth polygon (CCW from +X/starboard) from the shared TWIN_*
+  // constants (declared earlier in this file). The polygon is expressed in
+  // half-extent units and scaled by (beam/2, height) per station.
+  const tubeOuter = TWIN_TUBE_OFFSET + TWIN_TUBE_BEAM / 2 // outer X extent (× beam/2)
+  const tubeTop = TWIN_TUBE_HEIGHT // top/bottom Y extent (× height)
+  const crossH = TWIN_CROSSBEAM_H // centerline waist half-height (× height)
+  const crossW = TWIN_CROSSBEAM_W // centerline waist half-width (× beam/2)
+  const poly = []
+  // Shape the radius per angle so the silhouette reads as the twin peanut: two
+  // lobes (the tubes, centered at ±TWIN_TUBE_OFFSET) with a shallow waist
+  // groove at the centerline (x=0, the crossbeam) on the top and bottom arcs.
+  for (let i = 0; i < G; i++) {
+    const a = (2 * Math.PI * i) / G // 0 = +X/starboard
+    const ca = Math.cos(a)
+    const sa = Math.sin(a)
+    // Gaussian "waist" weight: 1 at x=0, ~0 away from it (the crossbeam groove).
+    const waist = Math.exp(-(ca * ca) / (2 * crossW * crossW))
+    // Gaussian "lobe" weight: 1 at |x| = TWIN_TUBE_OFFSET (each tube center).
+    const lobe = Math.exp(-((Math.abs(ca) - TWIN_TUBE_OFFSET) ** 2) / (2 * (TWIN_TUBE_BEAM * 0.5) ** 2))
+    // Y extent: the tube height in the lobe regions, the crossbeam height at
+    // the centerline waist (a shallow groove, not a deep notch).
+    const yTop = Math.max(tubeTop * lobe, crossH * waist)
+    // X extent: the tube outer edge in the lobe regions, the crossbeam width at
+    // the centerline.
+    const xExt = Math.max(tubeOuter * lobe, crossW * waist)
+    const x = xExt * ca
+    const y = yTop * sa
+    poly.push(new THREE.Vector3(x, y, 0))
+  }
+  // Longitudinal loft: scale the girth polygon per station by the twin's
+  // station taper (reuse ARCHETYPE_CURVES.twin via stationScales) + wobble.
+  const S = SKIN_CTRL_STATIONS
+  const field = smoothDisplacementField(S, G, rng, { freqU: 1, freqV: Math.max(2, skinRipple), waves: 3 })
+  const wobbleAmp = clamp(skinWobble, 0, 1) * SKIN_WOBBLE_MAX
+  const cage = []
+  for (let si = 0; si < S; si++) {
+    const s = si / (S - 1)
+    const z = -length / 2 + s * length
+    const { sx, sy } = stationScales('twin', s)
+    const row = []
+    for (let gi = 0; gi < G; gi++) {
+      const p = poly[gi]
+      const w = wobbleAmp * field[si][gi]
+      row.push(new THREE.Vector3(
+        p.x * (beam / 2) * sx * (1 + w),
+        p.y * height * sy * (1 + w),
+        z,
+      ))
+    }
+    cage.push(row)
+  }
+  // Collapse the terminal control rings to a small near-point (about the
+  // section center, y=0 for twinSkin) so the tip is narrow; the tessellator's
+  // flat cap then closes the small residual opening.
+  const TAPER_ZONE = 4
+  for (const end of [0, S - 1]) {
+    const zEnd = cage[end][0].z
+    const n = Math.min(TAPER_ZONE, S)
+    for (let k = 0; k < n; k++) {
+      const ringIdx = end === 0 ? k : S - 1 - k
+      const ease = 1 - k / n // terminal (k=0) -> 1.0, outermost -> ~0.5
+      const shrink = lerp(1, NOSE_TIP_MIN, ease)
+      for (let gi = 0; gi < G; gi++) {
+        const p = cage[ringIdx][gi]
+        cage[ringIdx][gi] = new THREE.Vector3(p.x * shrink, p.y * shrink, zEnd)
+      }
+    }
+  }
+  const surface = createSurface(cage, { periodicV: true })
+  const geometry = tessellate(surface, { rings: SKIN_RINGS, girth: SKIN_GIRTH, caps: true })
+  const mesh = new THREE.Mesh(geometry)
+  mesh.name = 'hull:skin:twin'
+  const g = new THREE.Group()
+  g.name = 'hull'
+  g.add(mesh)
+  return g
+}
+
+// insectSkin: a smooth loft following the insect's region layout (head /
+// thorax / abdomen fractions and segment girths from buildInsect). The girth
+// is a clamped B-spline through segment-boundary control values, giving a
+// C1-continuous bumpy "worm" silhouette.
+function buildInsectSkin(params, profile, rng) {
+  const { beam, height, length, skinWobble, skinRipple } = params
+  const halfLen = length / 2
+  // Region fractions (shared with buildInsect's layout).
+  const headStart = halfLen * 0.35
+  const thoraxStart = halfLen * 0.05
+  // Girth control values (unit half-extents, × beam/height at the region):
+  //   abdomen (stern half): tapered worm, ~0.45 beam girth, multi-bump.
+  //   thorax (middle): the widest region, ~0.48 beam.
+  //   head (fore): a compact cap, ~0.35 beam.
+  // Build the length-scale curve as a list of [s, scale] stops (s = z
+  // fraction 0..1 stern->nose) at the region boundaries, then sampleCurve for
+  // a smooth C1 girth.
+  const stops = [
+    [0, 0.30], // stern tip (abdomen tail)
+    [0.12, 0.45],
+    [0.28, 0.45],
+    [(thoraxStart + halfLen) / length, 0.50], // thorax start
+    [0.5, 0.50], // thorax full
+    [(headStart + halfLen) / length, 0.42], // head start
+    [0.85, 0.35],
+    [1, 0.10], // nose tip
+  ]
+  const S = SKIN_CTRL_STATIONS
+  const m = profile.length - 1
+  const field = smoothDisplacementField(S, m, rng, { freqU: 1, freqV: Math.max(2, skinRipple), waves: 3 })
+  const wobbleAmp = clamp(skinWobble, 0, 1) * SKIN_WOBBLE_MAX
+  const cage = []
+  for (let si = 0; si < S; si++) {
+    const s = si / (S - 1)
+    const z = -halfLen + s * length
+    const scale = Math.max(MIN_SCALE, sampleCurve(stops, s))
+    // The girth is anisotropic: beam (X) uses the scale directly; height (Y)
+    // uses a slightly smaller factor (the insect is flatter than it is wide).
+    const sx = scale
+    const sy = scale * 0.85
+    const row = []
+    for (let gi = 0; gi < m; gi++) {
+      const p = profile[gi]
+      const w = wobbleAmp * field[si][gi]
+      row.push(new THREE.Vector3(
+        p.x * beam * sx * (1 + w),
+        p.y * height * sy * (1 + w),
+        z,
+      ))
+    }
+    cage.push(row)
+  }
+  // Collapse the terminal control rings to a small near-point so the tip is
+  // narrow; the tessellator's flat cap then closes the small residual opening.
+  const TAPER_ZONE = 4
+  for (const end of [0, S - 1]) {
+    const zEnd = cage[end][0].z
+    const n = Math.min(TAPER_ZONE, S)
+    for (let k = 0; k < n; k++) {
+      const ringIdx = end === 0 ? k : S - 1 - k
+      const ease = 1 - k / n // terminal (k=0) -> 1.0, outermost -> ~0.5
+      const shrink = lerp(1, NOSE_TIP_MIN, ease)
+      for (const p of cage[ringIdx]) {
+        p.x *= shrink
+        p.y *= shrink
+        p.z = zEnd
+      }
+    }
+  }
+  const surface = createSurface(cage, { periodicV: true })
+  const geometry = tessellate(surface, { rings: SKIN_RINGS, girth: SKIN_GIRTH, caps: true })
+  const mesh = new THREE.Mesh(geometry)
+  mesh.name = 'hull:skin:insect'
+  const g = new THREE.Group()
+  g.name = 'hull'
+  g.add(mesh)
+  return g
+}
+
+// Re-center the skin group at the origin so its z-range is symmetric about
+// z=0 (the hull convention: origin at hull center). The skin builders taper
+// each end differently (stern vs nose), so the raw tessellated z-range is
+// asymmetric about 0; shifting the whole group by -(foreZ+aftZ)/2 makes it
+// symmetric. This is required for the module surface query's z-bin mapping,
+// which assumes the hull spans z in [-length/2, +length/2].
+function recenterSkin(group) {
+  let foreZ = -Infinity
+  let aftZ = Infinity
+  const v = new THREE.Vector3()
+  group.traverse((o) => {
+    if (!o.isMesh) return
+    const pos = o.geometry?.attributes?.position
+    if (!pos) return
+    const mat4 = new THREE.Matrix4()
+    o.updateWorldMatrix(true, false)
+    mat4.copy(o.matrixWorld)
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(mat4)
+      if (v.z > foreZ) foreZ = v.z
+      if (v.z < aftZ) aftZ = v.z
+    }
+  })
+  const dz = -(foreZ + aftZ) / 2
+  if (dz !== 0) group.position.z = dz
+}
+
+// Envelope + anchors derived from the tessellated skin geometry (the skins are
+// freeform, so the profile extrema do not describe them). Traverses the group's
+// mesh vertices for the six extrema and returns the info fields + anchor
+// inputs. Call AFTER recenterSkin so the extrema are origin-centered.
+function skinEnvelope(group, { length, beam, height }) {
+  let topY = -Infinity
+  let bottomY = Infinity
+  let portX = Infinity
+  let starX = -Infinity
+  let foreZ = -Infinity
+  let aftZ = Infinity
+  const v = new THREE.Vector3()
+  let any = false
+  group.traverse((o) => {
+    if (!o.isMesh) return
+    const pos = o.geometry?.attributes?.position
+    if (!pos) return
+    const mat4 = new THREE.Matrix4()
+    o.updateWorldMatrix(true, false)
+    mat4.copy(o.matrixWorld)
+    for (let i = 0; i < pos.count; i++) {
+      v.fromBufferAttribute(pos, i).applyMatrix4(mat4)
+      if (v.y > topY) topY = v.y
+      if (v.y < bottomY) bottomY = v.y
+      if (v.x < portX) portX = v.x
+      if (v.x > starX) starX = v.x
+      if (v.z > foreZ) foreZ = v.z
+      if (v.z < aftZ) aftZ = v.z
+      any = true
+    }
+  })
+  if (!any) {
+    // No geometry (should not happen): fall back to the configured envelope.
+    topY = height / 2
+    bottomY = -height / 2
+    portX = -beam / 2
+    starX = beam / 2
+    foreZ = length / 2
+    aftZ = -length / 2
+  }
+  return { topY, bottomY, portX, starX, foreZ, aftZ }
+}
+
 // --- anchors (hull-local, on the envelope surface) ---------------------------
 
 function buildAnchors(info, { topY, bottomY, foreZ, aftZ }) {
@@ -745,7 +1259,7 @@ function buildAnchors(info, { topY, bottomY, foreZ, aftZ }) {
 
 // --- main --------------------------------------------------------------------
 
-export function generateHull(params = {}) {
+export function generateHull(params = {}, { seed = 0 } = {}) {
   const length = clamp(params.length ?? DEFAULT_LENGTH, 4, 500)
   const beam = clamp(params.beam ?? DEFAULT_BEAM, 2, 500)
   const height = clamp(params.height ?? DEFAULT_HEIGHT, 1, 500)
@@ -767,7 +1281,17 @@ export function generateHull(params = {}) {
     centerY,
     noseTaper: clamp(params.noseTaper ?? 0.5, 0, 1),
     sternTaper: clamp(params.sternTaper ?? 0.35, 0, 1),
+    skinWobble: clamp(params.skinWobble ?? 0.35, 0, 1),
+    skinRipple: clamp(Math.round(params.skinRipple ?? 4), 2, 8),
+    lobeCount: clamp(Math.round(params.lobeCount ?? 3), 1, 8),
+    lobeSize: clamp(params.lobeSize ?? 0.35, 0.05, 1),
   }
+
+  // The skin archetypes draw their wobble/meander/lobe randomness from a
+  // dedicated seeded rng. Non-skin archetypes never consume it, so their
+  // geometry is unaffected by the seed (existing ships stay deterministic).
+  const isSkin = SKIN_ARCHETYPES.includes(archetype)
+  const skinRng = isSkin ? createRng(seed + SKIN_SEED_SALT) : null
 
   const profile = buildProfile(archetype, crossSection, chamfer)
   const m = profile.length - 1
@@ -799,6 +1323,27 @@ export function generateHull(params = {}) {
     case 'twin':
       group = buildTwin(resolved, profile, m, halfLen)
       break
+    // Skin archetypes: cubic B-spline (NURBS) surfaces (see the skin builders
+    // above). The cage is built from the configured cross-section profile so
+    // skins respect `crossSection`; `stations` is ignored (the tessellation
+    // density is the fixed SKIN_RINGS/SKIN_GIRTH).
+    case 'pod':
+      group = buildPod(resolved, profile, skinRng)
+      break
+    case 'slug':
+      group = buildSlug(resolved, profile, skinRng)
+      break
+    case 'cluster':
+      group = buildCluster(resolved, profile, skinRng)
+      break
+    case 'twinSkin':
+      // twinSkin ignores `crossSection` (its section is the fixed TWIN-derived
+      // peanut); it does not use the profile.
+      group = buildTwinSkin(resolved, skinRng)
+      break
+    case 'insectSkin':
+      group = buildInsectSkin(resolved, profile, skinRng)
+      break
     case 'blocky':
     case 'sleek':
     case 'lance':
@@ -809,22 +1354,50 @@ export function generateHull(params = {}) {
       break
   }
 
-  // Envelope + anchors shared by every body type.
-  const info = {
-    length,
-    beam,
-    height,
-    noseZ: halfLen,
-    sternZ: -halfLen,
-    archetype,
-    body: archetype,
+  // Envelope + anchors. The skin archetypes are freeform: their envelope and
+  // anchors are derived from the TESSELLATED GEOMETRY (traversed vertices),
+  // not the profile extrema, so the module surface query's z-bins map exactly
+  // onto the skin. All other archetypes keep the profile-extrema envelope.
+  let info
+  if (isSkin) {
+    // Center the skin at the origin (symmetric z-range) so the module surface
+    // query's z-bin mapping works, then derive the envelope from the geometry.
+    recenterSkin(group)
+    group.updateWorldMatrix(true, true)
+    const env = skinEnvelope(group, { length, beam, height })
+    info = {
+      length: env.foreZ - env.aftZ,
+      beam: env.starX - env.portX,
+      height: env.topY - env.bottomY,
+      noseZ: env.foreZ,
+      sternZ: env.aftZ,
+      archetype,
+      body: archetype,
+      freeform: true,
+    }
+    info.anchors = buildAnchors(info, {
+      topY: env.topY,
+      bottomY: env.bottomY,
+      foreZ: env.foreZ,
+      aftZ: env.aftZ,
+    })
+  } else {
+    info = {
+      length,
+      beam,
+      height,
+      noseZ: halfLen,
+      sternZ: -halfLen,
+      archetype,
+      body: archetype,
+    }
+    info.anchors = buildAnchors(info, {
+      topY: topFrac * (height / 2) + centerY,
+      bottomY: bottomFrac * (height / 2) + centerY,
+      foreZ: halfLen,
+      aftZ: -halfLen,
+    })
   }
-  info.anchors = buildAnchors(info, {
-    topY: topFrac * (height / 2) + centerY,
-    bottomY: bottomFrac * (height / 2) + centerY,
-    foreZ: halfLen,
-    aftZ: -halfLen,
-  })
 
   // Twin hull: the top/bottom anchors must point to the crossbeam (the only
   // surface at x=0), not the tube extrema. The tubes are offset in X; modules

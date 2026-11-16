@@ -15,6 +15,8 @@ import {
   NACELLE_TAIL_OPTIONS,
   NACELLE_MOUNTS,
   NACELLE_TYPES,
+  HULL_FEATURE_STYLES,
+  HULL_FEATURE_POSITIONS,
 } from '../core/generator/modules.js'
 
 // Modules harness — the thin pattern for SP-10. A flat schema mirrors the
@@ -64,6 +66,12 @@ const MODULES_SCHEMA = [
   { key: 'hangarCount', label: 'Hangar count', type: 'number', min: 0, max: 2, step: 1, int: true },
   { key: 'hangarStyle', label: 'Hangar style', type: 'select', options: HANGAR_STYLES },
   { key: 'hangarPosition', label: 'Hangar position', type: 'select', options: HANGAR_POSITIONS },
+  // hullFeatures
+  { key: 'hullFeaturesEnabled', label: 'Hull features', type: 'toggle' },
+  { key: 'hullFeaturesCount', label: 'Feature count', type: 'number', min: 0, max: 16, step: 1, int: true },
+  { key: 'hullFeaturesSize', label: 'Feature size', type: 'slider', min: 0.5, max: 2, step: 0.01 },
+  { key: 'hullFeaturesStyle', label: 'Feature style', type: 'select', options: HULL_FEATURE_STYLES },
+  { key: 'hullFeaturesPosition', label: 'Feature position', type: 'select', options: HULL_FEATURE_POSITIONS },
 ]
 
 // Flatten the working config's modules sub-object into the schema's flat keys
@@ -103,6 +111,11 @@ function flattenModules(m) {
     hangarCount: m.hangar?.count,
     hangarStyle: m.hangar?.style,
     hangarPosition: m.hangar?.position,
+    hullFeaturesEnabled: m.hullFeatures?.enabled,
+    hullFeaturesCount: m.hullFeatures?.count,
+    hullFeaturesSize: m.hullFeatures?.size,
+    hullFeaturesStyle: m.hullFeatures?.style,
+    hullFeaturesPosition: m.hullFeatures?.position,
   }
 }
 
@@ -127,6 +140,7 @@ function unflattenModules(flat) {
   nest('sensorMast', [['sensorMastEnabled', 'enabled'], ['sensorMastCount', 'count'], ['sensorMastHeight', 'height'], ['sensorMastStyle', 'style']])
   nest('antenna', [['antennaEnabled', 'enabled'], ['antennaCount', 'count'], ['antennaStyle', 'style']])
   nest('hangar', [['hangarEnabled', 'enabled'], ['hangarCount', 'count'], ['hangarStyle', 'style'], ['hangarPosition', 'position']])
+  nest('hullFeatures', [['hullFeaturesEnabled', 'enabled'], ['hullFeaturesCount', 'count'], ['hullFeaturesSize', 'size'], ['hullFeaturesStyle', 'style'], ['hullFeaturesPosition', 'position']])
   return out
 }
 

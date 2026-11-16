@@ -61,7 +61,8 @@ src/
       index.js            generateShip / randomConfig / disposeGroup (the spine)
       config.js           ShipConfig schema + normalize/validate/random/clone
       rng.js              createRng seeded PRNG (xorshift32)
-      hull.js             generateHull (9 archetypes)
+      hull.js             generateHull (14 archetypes: 9 lofted/composite + 5 skin)
+      nurbs.js            cubic B-spline (NURBS) curve/surface + tessellator
       modules.js          generateModules (superstructure)
       placeholder.js      static scaffold ship (compare mode)
     aesthetics/
@@ -87,11 +88,16 @@ src/
   `MeshStandardMaterial` → `generateModules` (hull-local, shared material) →
   assemble +Z-forward Group. It is PURE: it renders the config it is given and
   never re-resolves the aesthetic.
-- `generateHull(hullParams) -> { group: THREE.Group, info: HullInfo }` —
-  `HullInfo = { length, beam, height, noseZ, sternZ, anchors, archetype, body }`;
+- `generateHull(hullParams, { seed } = {}) -> { group: THREE.Group, info: HullInfo }` —
+  `HullInfo = { length, beam, height, noseZ, sternZ, anchors, archetype, body, freeform? }`;
   `anchors = { top, bottom, port, starboard, fore, aft }` (hull-local vectors).
   The group is one or more hull-body meshes; the spine assigns the shared
-  texture material to every mesh in it.
+  texture material to every mesh in it. `seed` is only consumed by the skin
+  archetypes (pod/slug/cluster/twinSkin/insectSkin) for their seeded wobble/
+  meander/lobes; non-skin archetypes are seed-independent. `freeform` (true for
+  skin archetypes) marks a hull whose cross-section is a freeform skin; modules.js
+  uses the flag to answer `surfaceRadiusAt` from a per-z-bin angular sector table
+  (origin-ray distances) instead of the elliptical half-extent formula.
 - `generateModules(cfg.modules, hullInfo, { material, hullGroup, color,
   glowColor })` — places superstructure in hull-local space, seating each module
   base on the hull's real surface (queried from `hullGroup`, not the envelope).
@@ -140,6 +146,22 @@ src/
    `SHIP_CONFIG_SCHEMA` and to the harness schema in `src/harness/hull.js`.
 5. **Verify** — `npm run build` + `npm run lint` green.
 
+**Freeform (skin) archetypes** — if the hull's cross-section is a freeform skin
+(a B-spline surface, not a lofted profile), additionally:
+
+- Set `info.freeform = true` on the returned `HullInfo` so `modules.js` answers
+  `surfaceRadiusAt` from a per-z-bin angular sector table (origin-ray
+  distances) instead of the elliptical half-extent formula.
+- Derive the envelope (`length`/`beam`/`height`/`noseZ`/`sternZ`) and anchors
+  from the tessellated geometry (traversed vertices), not the profile extrema.
+- Re-center the skin group at the origin (symmetric z-range) before deriving the
+  envelope — `makeSurfaceQuery` maps z-bins assuming the hull spans
+  `z ∈ [−L/2, +L/2]` about the origin.
+- Keep the skin's section centers at x=0 (Y-only meander at most) and the radial
+  wobble bounded (≤ ~35% of the local cage radius) so the origin stays inside
+  every cross-section (the radial function is single-valued and all angular
+  sectors are populated).
+
 ## Verification
 
 - **Lint**: `npm run lint` (ESLint 10 flat config).
@@ -159,6 +181,7 @@ Cross-file tuning values live in named constants so they stay in sync:
 | `NACELLE_COUNT_WEIGHTS` | `config.js` | `config.js` schema (aesthetics use the literal to avoid the circular import) |
 | `DEFAULT_TEXTURE_SIZE` | `config.js` | `config.js` schema, `textures/index.js` normalizer |
 | `TWIN_TUBE_OFFSET` / `TWIN_TUBE_BEAM` / `TWIN_TUBE_HEIGHT` / `TWIN_CROSSBEAM_W` / `TWIN_CROSSBEAM_H` / `TWIN_CROSSBEAM_L` | `hull.js` | `hull.js` (anchor + geometry), `modules.js` (weapon/nacelle placement) |
+| `SKIN_RINGS` / `SKIN_GIRTH` | `nurbs.js` | `hull.js` skin builders (tessellation density) |
 
 Texture tuning constants (`ORGANIC_SEED_SALT`, `PANEL_SEED_SALT`,
 `GREEBLE_SEED_SALT`, `PANEL_BASE_CELLS`, `PANEL_CELL_SPAN`, `PANEL_JITTER`,
@@ -171,7 +194,9 @@ Module tuning constants (`POD_TAPER`, `WEAPON_EMBED`, `EMBED_FLOOR`,
 are local to `modules.js`.
 
 Nose-taper constants (`NOSE_TIP_RADIUS`, `NOSE_TIP_MIN`, `NOSE_TAPER_RINGS`,
-`STERN_TAPER_FACTOR`) are local to `hull.js`.
+`STERN_TAPER_FACTOR`) and skin-builder constants (`SKIN_SEED_SALT`,
+`SKIN_CTRL_STATIONS`, `SLUG_MEANDER_MAX`, `SKIN_WOBBLE_MAX`, `LOBE_SEGMENTS`,
+`LOBE_RINGS`) are local to `hull.js`.
 
 When adding a new tuning value that is used in 2+ places, extract it to a named
 constant. When a constant is shared across files, prefer defining it in the

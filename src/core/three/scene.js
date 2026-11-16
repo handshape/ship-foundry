@@ -4,8 +4,8 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 // COORDINATE CONVENTION (applies across the whole app):
 //   - A ship's FORWARD direction is +Z.
 //   - A ship's origin is its center.
-//   - The default camera sits on the -Z side, so the ship's nose points away
-//     from the camera into the scene.
+//   - The default camera sits on the +Z side (in front of the nose), in a
+//     forward three-quarter view: the ship's nose points toward the camera.
 //
 // createViewport(container, { preset, antialias, pixelRatio } = {}) ->
 //   { scene, camera, controls,
@@ -19,13 +19,13 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 // contents, releases the WebGL context, and removes the canvas.
 
 // Camera presets: unit direction from the framed center toward the camera.
-// 'three-quarter' (the default) sits on the -Z side per the convention:
-// behind, above, and to the starboard of the ship.
+// 'three-quarter' (the default) sits on the +Z side (forward): in front,
+// above, and to the starboard of the ship, so the nose points at the camera.
 const CAMERA_PRESETS = {
   front: new THREE.Vector3(0, 0, 1),
   side: new THREE.Vector3(1, 0, 0),
   top: new THREE.Vector3(0, 1, 1e-4),
-  'three-quarter': new THREE.Vector3(0.75, 0.5, -1).normalize(),
+  'three-quarter': new THREE.Vector3(0.75, 0.5, 1).normalize(),
 }
 
 // Consistent three-light rig for every scene: a hemisphere ambient with a DARK
@@ -92,7 +92,7 @@ const _sz = new THREE.Vector3()
  * the OrbitControls target to the sphere's center.
  * Returns { center, distance }, or null if the object has no bounds.
  */
-export function frameToObject(camera, controls, object, margin = 1.35) {
+export function frameToObject(camera, controls, object, margin = 1.12) {
   _box.setFromObject(object)
   if (_box.isEmpty()) return null
   _box.getBoundingSphere(_sphere)
@@ -193,7 +193,7 @@ export function createViewport(container, { preset = 'three-quarter', antialias 
       return
     }
     framePending = false
-    const result = frameToObject(camera, controls, ship)
+    const result = frameToObject(camera, controls, ship, 1.12)
     if (result) {
       frameCenter.copy(result.center)
       frameDistance = result.distance

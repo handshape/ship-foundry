@@ -1,7 +1,7 @@
 import * as THREE from 'three'
 import { normalizeConfig, randomFromSchema } from './config.js'
 import { createRng } from './rng.js'
-import { generateHull } from './hull.js'
+import { generateHull, SKIN_ARCHETYPES } from './hull.js'
 import { generateModules } from './modules.js'
 import { generateTextures, createShipMaterial } from '../textures/index.js'
 
@@ -31,8 +31,10 @@ export function generateShip(config = {}, seed) {
   const effectiveSeed = seed !== undefined ? seed : config?.seed ?? 0
   const cfg = normalizeConfig({ ...config, seed: effectiveSeed })
 
-  // Hull geometry + placement info (dimensions + surface anchors).
-  const hull = generateHull(cfg.hull)
+  // Hull geometry + placement info (dimensions + surface anchors). The seed is
+  // passed so the skin archetypes (pod/slug/cluster/twinSkin/insectSkin) can
+  // derive their seeded wobble/meander/lobes; non-skin archetypes ignore it.
+  const hull = generateHull(cfg.hull, { seed: effectiveSeed })
 
   // Procedural surface maps -> PBR materials. Two materials are created:
   //   - hullMaterial:   includes the emissive map (windows glow) — hull only.
@@ -77,6 +79,9 @@ export function generateShip(config = {}, seed) {
     const t = cfg.texture
     console.group(`[ship] seed=${cfg.seed} aesthetic=${cfg.aesthetic}`)
     console.log(`hull: ${cfg.hull.archetype} ${cfg.hull.length}x${cfg.hull.beam}x${cfg.hull.height} ${cfg.hull.crossSection}`)
+    if (SKIN_ARCHETYPES.includes(cfg.hull.archetype)) {
+      console.log(`  skin: wobble=${cfg.hull.skinWobble} ripple=${cfg.hull.skinRipple} lobes=${cfg.hull.lobeCount} lobeSize=${cfg.hull.lobeSize}`)
+    }
     console.log(`palette: ${t.palette?.join(' ')}`)
     // Bridge
     const b = m.bridge
@@ -88,7 +93,7 @@ export function generateShip(config = {}, seed) {
       console.log(`  nacelles: enabled=${nc.enabled} mount=${nc.mount} (${len}) type=${nc.type} count=${nc.count} size=${nc.size} strut=${nc.strut} lift=${nc.lift} angle=${nc.angle} tail=${nc.tail}`)
     }
     // Other modules (generic)
-    for (const k of ['commandSpike', 'weapons', 'sensorMast', 'antenna', 'hangar']) {
+    for (const k of ['commandSpike', 'weapons', 'sensorMast', 'antenna', 'hangar', 'hullFeatures']) {
       const v = m[k]
       if (!v || typeof v !== 'object') continue
       const parts = [`enabled=${v.enabled}`]

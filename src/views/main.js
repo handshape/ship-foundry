@@ -25,6 +25,8 @@ import {
   NACELLE_TAIL_OPTIONS,
   NACELLE_MOUNTS,
   NACELLE_TYPES,
+  HULL_FEATURE_STYLES,
+  HULL_FEATURE_POSITIONS,
 } from '../core/generator/modules.js'
 
 // MAIN APPLICATION (SP-08).
@@ -58,6 +60,11 @@ const HULL_CONTROLS = [
   { key: 'discUpperCurve', label: 'Disc upper curve', type: 'select', options: ['convex', 'concave'] },
   { key: 'discLowerCurve', label: 'Disc lower curve', type: 'select', options: ['convex', 'concave'] },
   { key: 'discEdge', label: 'Disc edge', type: 'select', options: ['cylinder', 'frustum'] },
+  // Skin archetype params (pod/slug/cluster/twinSkin/insectSkin).
+  { key: 'skinWobble', label: 'Skin wobble', type: 'slider', min: 0, max: 1, step: 0.01 },
+  { key: 'skinRipple', label: 'Skin ripple', type: 'slider', min: 2, max: 8, step: 1, int: true },
+  { key: 'lobeCount', label: 'Lobes (cluster)', type: 'slider', min: 2, max: 5, step: 1, int: true },
+  { key: 'lobeSize', label: 'Lobe size', type: 'slider', min: 0.15, max: 0.6, step: 0.01 },
 ]
 
 // The texture group: the 4-color palette first (color inputs), then the
@@ -96,6 +103,7 @@ const MODULE_LABELS = {
   sensorMast: 'Sensor mast',
   antenna: 'Antenna',
   hangar: 'Hangar',
+  hullFeatures: 'Hull features',
 }
 const MODULE_FIELD_LABELS = {
   enabled: 'Enabled',
@@ -131,6 +139,8 @@ const MODULE_FIELD_OPTIONS = {
   'antenna.style': ANTENNA_STYLES,
   'hangar.style': HANGAR_STYLES,
   'hangar.position': HANGAR_POSITIONS,
+  'hullFeatures.style': HULL_FEATURE_STYLES,
+  'hullFeatures.position': HULL_FEATURE_POSITIONS,
 }
 
 // Camera preset buttons (mapped onto the viewport's preset names).
@@ -138,7 +148,7 @@ const CAMERA_PRESETS = [
   { key: 'front', label: 'Front', icon: 'arrow-up' },
   { key: 'side', label: 'Side', icon: 'arrow-right' },
   { key: 'top', label: 'Top', icon: 'arrow-big-up' },
-  { key: 'three-quarter', label: '3/4', icon: 'box' },
+  { key: 'three-quarter', label: '3/4 (front)', icon: 'box' },
 ]
 
 // --- small helpers -----------------------------------------------------------

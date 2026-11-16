@@ -36,6 +36,8 @@ import {
   NACELLE_MOUNTS,
   NACELLE_TYPES,
   HANGAR_POSITIONS,
+  HULL_FEATURE_STYLES,
+  HULL_FEATURE_POSITIONS,
 } from './modules.js'
 import { listAesthetics } from '../aesthetics/index.js'
 
@@ -85,6 +87,12 @@ export const SHIP_CONFIG_SCHEMA = {
       discUpperCurve: choice(['convex', 'concave'], 'convex'),
       discLowerCurve: choice(['convex', 'concave'], 'convex'),
       discEdge: choice(['cylinder', 'frustum'], 'cylinder'),
+      // Skin archetype params (pod/slug/cluster/twinSkin/insectSkin). These are
+      // no-ops for the non-skin archetypes (they consume nothing).
+      skinWobble: num(0, 1, 0.35),
+      skinRipple: num(2, 8, 4, true),
+      lobeCount: numW(2, 5, 3, true, [2, 3, 3, 4, 5]),
+      lobeSize: num(0.15, 0.6, 0.35),
     },
   },
 
@@ -186,6 +194,21 @@ export const SHIP_CONFIG_SCHEMA = {
           count: num(0, 2, 1, true),
           style: choice(['bay', 'pod', 'dock'], 'bay'),
           position: choice(HANGAR_POSITIONS, 'side'),
+        },
+      },
+      // Hull features: flavour equipment mounted on the hull (normal to the
+      // surface on the body, or a single nose-tip feature pointing +Z). `style`
+      // selects the feature type; `mixed` makes each instance pick a random
+      // concrete type. `position` is 'body' (paired/mirrored) or 'nose'
+      // (single centreline feature).
+      hullFeatures: {
+        type: 'object',
+        children: {
+          enabled: flag(true),
+          count: num(0, 16, 6, true),
+          size: num(0.5, 2, 1),
+          style: choice(HULL_FEATURE_STYLES, 'mixed'),
+          position: choice(HULL_FEATURE_POSITIONS, 'body'),
         },
       },
     },

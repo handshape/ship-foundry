@@ -125,6 +125,36 @@ export const HANGAR_POSITIONS = ['side', 'nose', 'chin', 'belly']
 export const SENSOR_MAST_STYLES = ['mast', 'pole', 'ring']
 export const ANTENNA_STYLES = ['whip', 'array', 'dish']
 
+// Hull-feature style options: flavour equipment mounted on the hull. Each is a
+// distinct multi-part, multi-material geometry built in a local frame (base at
+// the origin, extending +Y) and oriented normal to the surface (body) or +Z
+// (nose). `mixed` is a variety mode: each instance resolves a random concrete
+// type via its per-instance sub-rng. A missing/invalid value falls back to
+// 'greeble' in resolveHullFeatureStyle.
+export const HULL_FEATURE_STYLES = [
+  'antennaCluster',
+  'dome',
+  'greeble',
+  'roundel',
+  'vent',
+  'bussard',
+  'rcsThrusters',
+  'panelHatch',
+  'lightBank',
+  'mixed',
+]
+// Where on the hull a hull feature is mounted: 'body' = normal to the surface
+// (paired, mirrored across the centreline); 'nose' = a single nose-tip feature
+// pointing +Z (centreline, not mirrored). A missing/invalid value falls back to
+// 'body' in buildHullFeature.
+export const HULL_FEATURE_POSITIONS = ['body', 'nose']
+// The concrete (non-variety) hull-feature types, used by `mixed` resolution.
+const HULL_FEATURE_CONCRETE = HULL_FEATURE_STYLES.filter((s) => s !== 'mixed')
+// Per-instance sub-rng seed multiplier: instance i's rng is seeded by
+// (seed + i * HF_SEED_MULT), so each instance is fully determined by
+// (seed, i) — independent of iteration order (see buildHullFeature).
+const HF_SEED_MULT = 6151
+
 // Weapon style options (mirror of the other component STYLES). Every weapon
 // style keeps its barrel aligned along the axis of travel (+Z, the ship's
 // forward); the styles differ in turret/gunhouse silhouette, barrel, and any
@@ -429,6 +459,17 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
   for (let b = 0; b < NBINS; b++) {
     bins.push({ minY: Infinity, maxY: -Infinity, minX: Infinity, maxX: -Infinity, count: 0 })
   }
+  // FREEFORM (skin) hulls: a per-z-bin angular sector table for the
+  // origin-ray surfaceRadiusAt query. `FREEFORM_SECTORS` sectors around the
+  // origin (atan2(y, x)), each storing the FURTHEST vertex distance from the
+  // origin in that sector (Infinity = unpopulated). The sectoring is from the
+  // ORIGIN (not a per-bin centroid) because the callers consume an origin-ray
+  // distance (see surfaceRadiusAt).
+  const FREEFORM_SECTORS = 24
+  const isFreeform = !!hullInfo.freeform
+  const sectorTables = isFreeform
+    ? Array.from({ length: NBINS }, () => new Float64Array(FREEFORM_SECTORS).fill(Infinity))
+    : null
   const binIndex = (z) => {
     const f = (z + halfLen) / (2 * halfLen) // 0 at stern .. 1 at nose
     return Math.max(0, Math.min(NBINS - 1, Math.floor(f * NBINS)))
@@ -456,6 +497,15 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
         if (v.x > bin.maxX) bin.maxX = v.x
         bin.count++
         hasGeometry = true
+        if (sectorTables) {
+          // Origin-ray distance + angular sector for the freeform table.
+          const r = Math.hypot(v.x, v.y)
+          let ang = Math.atan2(v.y, v.x)
+          if (ang < 0) ang += Math.PI * 2
+          const sec = Math.min(FREEFORM_SECTORS - 1, Math.floor((ang / (Math.PI * 2)) * FREEFORM_SECTORS))
+          const table = sectorTables[binIndex(v.z)]
+          if (r > table[sec]) table[sec] = r
+        }
       }
     })
   }
@@ -608,6 +658,62 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
   // if the fraction of the X range that contains vertices is low (< 0.65), the
   // section has a gap. For a two-tube section, the pod is placed on the nearest
   // tube's surface (the tube on the pod's side of the centreline).
+  //
+  // Freeform (skin) hulls: interpolate the per-bin angular sector table. The
+  // sector table stores the furthest origin-distance per sector, so this
+  // returns the origin-ray surface distance in the angle's direction — exactly
+  // the contract the callers consume (cy = sin(a)*r, mountX = cos(a)*rr).
+  // Circular interpolation between the two bracketing sectors, linear between
+  // the adjacent non-empty bins. Empty-sector fallback: nearest populated
+  // sector in the same bin, then neighboring bins.
+  const freeformSectorAngle = (tbl, angle) => {
+    let a = angle % (Math.PI * 2)
+    if (a < 0) a += Math.PI * 2
+    const sectorF = (a / (Math.PI * 2)) * FREEFORM_SECTORS
+    const k0 = Math.floor(sectorF) % FREEFORM_SECTORS
+    const k1 = (k0 + 1) % FREEFORM_SECTORS
+    const f = sectorF - Math.floor(sectorF)
+    const r0 = tbl[k0]
+    const r1 = tbl[k1]
+    if (r0 === Infinity && r1 === Infinity) {
+      // Both bracketing sectors empty: nearest populated sector (circular).
+      let best = -1
+      let bestDist = Infinity
+      for (let s = 0; s < FREEFORM_SECTORS; s++) {
+        if (tbl[s] === Infinity) continue
+        let d = Math.abs(s - k0)
+        d = Math.min(d, FREEFORM_SECTORS - d)
+        if (d < bestDist) {
+          bestDist = d
+          best = s
+        }
+      }
+      return best >= 0 ? tbl[best] : null
+    }
+    if (r0 === Infinity) return r1
+    if (r1 === Infinity) return r0
+    return lerp(r0, r1, clamp(f, 0, 1))
+  }
+  const sectorRadiusAt = (angle, b) => {
+    const table = sectorTables[b]
+    // Nearest populated sector (circular scan) within a bin.
+    const populated = (tbl) => {
+      for (let s = 0; s < FREEFORM_SECTORS; s++) if (tbl[s] !== Infinity) return true
+      return false
+    }
+    if (!populated(table)) {
+      // Fall back to the nearest non-empty bin's table.
+      let lo = b - 1
+      while (lo >= 0 && !populated(sectorTables[lo])) lo--
+      let hi = b + 1
+      while (hi < NBINS && !populated(sectorTables[hi])) hi++
+      if (lo < 0 && hi >= NBINS) return null
+      const tbl = lo < 0 ? sectorTables[hi] : sectorTables[lo]
+      return freeformSectorAngle(tbl, angle)
+    }
+    return freeformSectorAngle(table, angle)
+  }
+
   function surfaceRadiusAt(angle, z) {
     const b0 = binIndex(z)
     const cosA = Math.cos(angle)
@@ -615,6 +721,18 @@ function makeSurfaceQuery(hullGroup, hullInfo) {
     const halfBeam = (hullInfo.beam ?? DEFAULT_BEAM) / 2
     const halfHeight = (hullInfo.height ?? DEFAULT_HEIGHT) / 2
     if (!hasGeometry) return Math.min(halfBeam, halfHeight) * 0.1
+    // FREEFORM (skin) hulls: the cross-section is a freeform skin, not an
+    // ellipse. Answer from the per-bin angular sector table (origin-ray
+    // distances), interpolated between the adjacent non-empty bins.
+    if (isFreeform) {
+      // The dense skin tessellation fills every z-bin across the skin's
+      // z-extent (the envelope is derived from the geometry, so the bins map
+      // exactly), so the containing bin's table is populated. sectorRadiusAt
+      // already falls back to neighboring bins for the rare empty case.
+      const r = sectorRadiusAt(angle, b0)
+      const floor = Math.min(halfBeam, halfHeight) * 0.05
+      return r !== null ? Math.max(r, floor) : Math.min(halfBeam, halfHeight) * 0.1
+    }
     // Interpolated half-extents at this Z (linear between surrounding rings).
     const halfX = Math.max(
       Math.abs(interp(b0, 'maxX', halfBeam)),
@@ -727,7 +845,11 @@ function buildBridge(rng, ctx) {
   // slightly off).
   const baseY = surface.surfaceAt('top', z) - Math.max(EMBED_FLOOR, h * EMBED_FRAC)
   const glass = glassMaterial(glowColor)
-  const base = { mat, glowMat, glass, hull, s, w, h, d, z, topY: baseY, fore }
+  // deckY is the real deck height at this z (before the embed is subtracted).
+  // The neck/collar builders use it so the structure emerges from the deck
+  // rather than being measured up from the embedded base (which on a large
+  // hull can leave the neck apex below the deck).
+  const base = { mat, glowMat, glass, hull, s, w, h, d, z, topY: baseY, deckY: baseY + Math.max(EMBED_FLOOR, h * EMBED_FRAC), fore }
 
   let g
   switch (style) {
@@ -996,12 +1118,17 @@ function buildBridgeDome(b) {
 //           (or slightly embedded) in the hull and its apex reaching into
 //           the capsule. The apex has random play in the Y-Z plane.
 function buildBridgeCapsule(rng, b) {
-  const { mat, glowMat, glass, z, topY } = b
+  const { mat, glowMat, glass, z, topY, deckY = topY } = b
   // Halve the capsule bridge dimensions so it reads as a compact cockpit pod
   // rather than a bulky block. The neck and flange scale with the capsule.
   const w = b.w * 0.5
   const h = b.h * 0.5
   const d = b.d * 0.5
+  // The neck emerges from the DECK (deckY), not the embedded base (topY), so
+  // it can't be swallowed by the embed on a large hull. A minimum protrusion
+  // guarantees the neck apex/top clears the deck even when the neck's natural
+  // height (a fraction of h) is smaller than the embed depth.
+  const neckClear = Math.max(h * 0.08, 0.08)
   const group = new THREE.Group()
   group.name = 'bridge:capsule'
 
@@ -1021,13 +1148,14 @@ function buildBridgeCapsule(rng, b) {
 
   if (neckStyle === 'wedge') {
     // Triangular-prism neck: cross-section in the Y-Z plane, extruded in X.
-    // Bottom edge flush with (or slightly inside) the deck; apex reaches
-    // into the capsule. The apex has random play in Y and Z.
+    // The base edge sits slightly inside the DECK; the apex reaches into the
+    // capsule and is guaranteed to clear the deck by `neckClear`. The apex has
+    // random play in Y and Z.
     const wedgeHalfW = w * 0.45
-    const wedgeH = h * 0.5
-    const apexY = topY + wedgeH + rng.range(-h * 0.04, h * 0.06)
+    const wedgeH = Math.max(h * 0.5, neckClear)
+    const apexY = deckY + wedgeH + rng.range(-h * 0.04, h * 0.06)
     const apexZ = z + rng.range(-d * 0.06, d * 0.06)
-    const botY = topY - h * 0.03
+    const botY = deckY - h * 0.03
 
     const shape = new THREE.Shape()
     shape.moveTo(-wedgeHalfW, botY)
@@ -1051,18 +1179,19 @@ function buildBridgeCapsule(rng, b) {
     capY = apexY + capsuleR * 0.15
     capZ = apexZ
   } else {
-    // Round neck: a tapered cylinder rising from the deck, flaring at the base.
-    const neckH = h * 0.4
+    // Round neck: a tapered cylinder rising from the DECK, flaring at the base.
+    // Its height is guaranteed to clear the deck by `neckClear`.
+    const neckH = Math.max(h * 0.4, neckClear)
     const neckTopR = w * 0.24
     const neckBotR = w * 0.38
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(neckTopR, neckBotR, neckH, 8), mat)
     neck.name = 'bridgeCapsuleNeck'
-    neck.position.set(0, topY + neckH * 0.5, z)
+    neck.position.set(0, deckY + neckH * 0.5, z)
     group.add(neck)
 
     const flange = new THREE.Mesh(new THREE.CylinderGeometry(w * 0.44, w * 0.5, h * 0.07, 8), mat)
     flange.name = 'bridgeCapsuleFlange'
-    flange.position.set(0, topY + h * 0.035, z)
+    flange.position.set(0, deckY + h * 0.035, z)
     group.add(flange)
 
     const flangeDome = new THREE.Mesh(
@@ -1070,7 +1199,7 @@ function buildBridgeCapsule(rng, b) {
       mat,
     )
     flangeDome.name = 'bridgeCapsuleFlangeDome'
-    flangeDome.position.set(0, topY, z)
+    flangeDome.position.set(0, deckY, z)
     group.add(flangeDome)
 
     // Distance from capsule center to its lowest point (varies by side count).
@@ -1079,7 +1208,7 @@ function buildBridgeCapsule(rng, b) {
       const sy = Math.sin((k / sides) * Math.PI * 2 + rotY)
       if (-sy > capBottom) capBottom = -sy
     }
-    capY = topY + neckH + capBottom * capsuleR
+    capY = deckY + neckH + capBottom * capsuleR
   }
 
   // Capsule body: a regular polygon extruded along +Z (the travel axis),
@@ -3727,6 +3856,360 @@ function aftPodRadius(sternGirth, n, requestedRadius) {
 // not batch into InstancedMesh the way the old single-geometry repeats did.
 // Weapons and nacelles in particular are always built as individual groups —
 // correctness + per-style distinctness matter more than the draw-call win here.
+// --- hull features -----------------------------------------------------------
+//
+// Hull features are flavour equipment mounted on the hull (see
+// HULL_FEATURE_STYLES). Unlike the other modules (built directly in hull/world
+// coordinates), each feature is built in a LOCAL FRAME — base at the local
+// origin, extending along local +Y — and then transformed (oriented +
+// translated) to its mount point. The local-frame transform (orientLocalFrame)
+// is the clean way to satisfy "normal to the surface": the feature's up-axis
+// (local +Y) maps to the outward hull normal on the body, or to +Z on the nose.
+//
+// All randomness flows from a per-instance sub-rng (see buildHullFeature); no
+// Math.random. Features are multi-part and not instanced (distinctness over the
+// draw-call win), consistent with the rest of the module catalog.
+
+// Small mesh helper for the hull-feature sub-builders: creates a mesh, names it,
+// positions it, and adds it to the given group (returns the mesh so a caller can
+// add children / rotate it). Keeps the 9 sub-builders DRY.
+function hfMesh(group, geo, mat, name, x = 0, y = 0, z = 0) {
+  const m = new THREE.Mesh(geo, mat)
+  m.name = name
+  m.position.set(x, y, z)
+  group.add(m)
+  return m
+}
+
+// Orient a local-frame group so its local +Y maps to the desired direction
+// `dir` (the outward hull normal on the body, or +Z on the nose), while keeping
+// its local +Z (fore-aft) aligned with the hull's travel axis as much as
+// possible. Builds an orthonormal basis: y = dir; z = worldZ - (worldZ·y)y
+// (fallback (0,1,0) when dir ≈ worldZ, i.e. the nose case); x = y × z. Then sets
+// the group's quaternion from the basis matrix (columns = x, y, z).
+function orientLocalFrame(group, dir) {
+  const y = dir.clone().normalize()
+  const worldZ = new THREE.Vector3(0, 0, 1)
+  let z = worldZ.clone().addScaledVector(y, -worldZ.dot(y)).normalize()
+  if (z.lengthSq() < 1e-6) z.set(0, 1, 0)
+  const x = new THREE.Vector3().crossVectors(y, z)
+  const m = new THREE.Matrix4().makeBasis(x, y, z)
+  group.quaternion.setFromRotationMatrix(m)
+}
+
+// The outward surface normal (in the X-Y plane, z-free) at hull angle `theta`
+// and station `z`, for orienting a body feature normal to the surface.
+//   - Freeform (skin) and twin hulls: the radial direction (cosθ, sinθ, 0) — a
+//     good normal approximation for roughly-convex skins / tubes.
+//   - Lofted (elliptical) hulls: the ellipse normal (cosθ/halfX, sinθ/halfY, 0),
+//     the same normal buildWeapon derives (its halfX/halfY are the surface's
+//     side/top extents at z).
+function hullFeatureNormal(theta, z, surface, hull) {
+  if (hull.freeform || hull.archetype === 'twin') {
+    return new THREE.Vector3(Math.cos(theta), Math.sin(theta), 0).normalize()
+  }
+  const halfX = Math.max(surface.surfaceAt('side', z), 1e-3)
+  const halfY = Math.max(surface.surfaceAt('top', z), 1e-3)
+  return new THREE.Vector3(Math.cos(theta) / halfX, Math.sin(theta) / halfY, 0).normalize()
+}
+
+// Resolve a hull-feature style: `mixed` draws a concrete type from the given
+// rng; a concrete value passes through; a missing/invalid value falls back to
+// 'greeble'.
+function resolveHullFeatureStyle(style, rng) {
+  if (style === 'mixed') return rng.pick(HULL_FEATURE_CONCRETE)
+  return HULL_FEATURE_CONCRETE.includes(style) ? style : 'greeble'
+}
+
+// antennaCluster — a thin base plate + 3-6 thin STRAIGHT rods of varying heights
+// (all vertical, no lean), 1-3 with small emissive tips no wider than the rod.
+// Reads as a comm array.
+function buildHullFeatureAntennaCluster(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:antennaCluster'
+  const baseW = R * 0.3
+  const baseH = R * 0.12
+  hfMesh(group, new THREE.BoxGeometry(baseW, baseH, baseW), mat, 'hfAntennaBase', 0, baseH / 2, 0)
+  const rods = 3 + rng.int(0, 3) // 3-6
+  const tips = 1 + rng.int(0, 2) // 1-3
+  for (let k = 0; k < rods; k++) {
+    const hgt = R * (0.4 + rng.next() * 0.8)
+    const r = R * 0.02
+    const ox = (rng.next() - 0.5) * baseW * 0.8
+    const oz = (rng.next() - 0.5) * baseW * 0.8
+    const rod = hfMesh(group, new THREE.CylinderGeometry(r, r * 1.3, hgt, 6), mat, 'hfAntennaRod', ox, baseH + hgt / 2, oz)
+    // Tip: a small emissive bulb at the rod's top, no wider than the rod itself.
+    if (k < tips) hfMesh(rod, new THREE.SphereGeometry(r, 8, 6), glowMat, 'hfAntennaTip', 0, hgt / 2 + r * 0.5, 0)
+  }
+  return group
+}
+
+// dome — a mat collar + a faceted mat dome (sphere-cap / icosahedron / truncated
+// icosahedron / ovoid), optional mat struts and an optional glowMat base ring.
+// Reads as a shield/scanning emitter.
+function buildHullFeatureDome(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:dome'
+  const dR = R * 0.28
+  const collarH = R * 0.1
+  hfMesh(group, new THREE.CylinderGeometry(dR * 1.15, dR * 1.25, collarH, 16), mat, 'hfDomeCollar', 0, collarH / 2, 0)
+  if (rng.chance(0.6)) {
+    const ring = hfMesh(group, new THREE.TorusGeometry(dR * 1.15, R * 0.05, 6, 20), glowMat, 'hfDomeRing', 0, collarH, 0)
+    ring.rotation.x = Math.PI / 2
+  }
+  const domeH = dR * (0.8 + rng.next() * 0.5)
+  const style = rng.pick(['cap', 'ico', 'trunc', 'ovoid'])
+  let geo
+  if (style === 'cap') geo = new THREE.SphereGeometry(dR, 20, 10, 0, PI2, 0, Math.PI * 0.55)
+  else if (style === 'ico') geo = new THREE.IcosahedronGeometry(dR, 0)
+  else if (style === 'trunc') geo = makeTruncatedIcosahedron(dR)
+  else geo = new THREE.SphereGeometry(dR, 16, 12)
+  const dm = hfMesh(group, geo, mat, 'hfDome', 0, collarH + domeH * 0.4, 0)
+  if (style === 'ovoid') dm.scale.set(1, 0.7, 1)
+  if (rng.chance(0.5)) {
+    const struts = 3 + rng.int(0, 2)
+    for (let k = 0; k < struts; k++) {
+      const a = (k / struts) * PI2
+      hfMesh(group, new THREE.BoxGeometry(R * 0.02, domeH * 0.8, R * 0.02), mat, 'hfDomeStrut', Math.cos(a) * dR * 0.85, collarH + domeH * 0.4, Math.sin(a) * dR * 0.85)
+    }
+  }
+  return group
+}
+
+// greeble — 4-8 aligned, partially overlapping boxes + small cylinders of varying
+// sizes stacked along +Y off a base plate. Reads as industrial equipment.
+function buildHullFeatureGreeble(rng, b) {
+  const { mat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:greeble'
+  const baseW = R * 0.35
+  const baseH = R * 0.1
+  hfMesh(group, new THREE.BoxGeometry(baseW, baseH, baseW), mat, 'hfGreebleBase', 0, baseH / 2, 0)
+  const n = 4 + rng.int(0, 5) // 4-8
+  let y = baseH
+  for (let k = 0; k < n; k++) {
+    const w = R * (0.12 + rng.next() * 0.2)
+    const h = R * (0.1 + rng.next() * 0.18)
+    const d = R * (0.12 + rng.next() * 0.2)
+    const ox = (rng.next() - 0.5) * baseW * 0.5
+    const oz = (rng.next() - 0.5) * baseW * 0.5
+    if (rng.chance(0.7)) {
+      hfMesh(group, new THREE.BoxGeometry(w, h, d), mat, 'hfGreebleBox', ox, y + h / 2, oz)
+    } else {
+      const cyl = hfMesh(group, new THREE.CylinderGeometry(w * 0.4, w * 0.4, h, 10), mat, 'hfGreebleCyl', ox, y + h / 2, oz)
+      cyl.rotation.x = rng.next() < 0.5 ? Math.PI / 2 : 0
+      cyl.rotation.z = rng.next() < 0.5 ? Math.PI / 2 : 0
+    }
+    y += h * (0.7 + rng.next() * 0.4)
+  }
+  return group
+}
+
+// roundel — a mat bezel ring (torus) framing a flat emissive disc (glowMat, facing
+// +Y), backed by a shallow mat hemisphere so it bulges out of the hull. Reads as
+// an insignia/beacon.
+function buildHullFeatureRoundel(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:roundel'
+  const dR = R * 0.25
+  const bulgeH = R * 0.09
+  hfMesh(group, new THREE.SphereGeometry(dR * 1.1, 20, 8, 0, PI2, 0, Math.PI * 0.5), mat, 'hfRoundelBack', 0, bulgeH * 0.2, 0)
+  const disc = hfMesh(group, new THREE.CircleGeometry(dR, 24), glowMat, 'hfRoundelDisc', 0, bulgeH + 0.001, 0)
+  disc.rotation.x = -Math.PI / 2
+  const bezel = hfMesh(group, new THREE.TorusGeometry(dR * 1.05, R * 0.03, 6, 24), mat, 'hfRoundelBezel', 0, bulgeH + 0.001, 0)
+  bezel.rotation.x = Math.PI / 2
+  return group
+}
+
+// vent — a rectangular or circular mat housing with 3-5 louver slats (thin angled
+// boxes); the "intake" variant gets a faint glowMat interior recess. Reads as
+// heat/airflow.
+function buildHullFeatureVent(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:vent'
+  const w = R * 0.32
+  const d = R * 0.26
+  const h = R * 0.16
+  if (rng.chance(0.4)) {
+    hfMesh(group, new THREE.CylinderGeometry(w * 0.5, w * 0.5, h, 20), mat, 'hfVentHousing', 0, h / 2, 0)
+  } else {
+    hfMesh(group, new THREE.BoxGeometry(w, h, d), mat, 'hfVentHousing', 0, h / 2, 0)
+  }
+  const slats = 3 + rng.int(0, 3) // 3-5
+  for (let k = 0; k < slats; k++) {
+    const sy = h * (0.25 + 0.55 * (k / Math.max(1, slats - 1)))
+    const slat = hfMesh(group, new THREE.BoxGeometry(w * 0.92, R * 0.02, d * 0.85), mat, 'hfVentSlat', 0, sy, 0)
+    slat.rotation.x = 0.5
+  }
+  if (rng.chance(0.5)) {
+    const inner = hfMesh(group, new THREE.CircleGeometry(Math.min(w, d) * 0.4, 16), glowMat, 'hfVentInner', 0, h + 0.001, 0)
+    inner.rotation.x = -Math.PI / 2
+  }
+  return group
+}
+
+// bussard — a circular particle collector: mat rim + radial vanes + central hub on
+// a short mount; optional faint glowMat core.
+function buildHullFeatureBussard(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:bussard'
+  const r = R * 0.26
+  const mountH = R * 0.12
+  hfMesh(group, new THREE.CylinderGeometry(r * 0.3, r * 0.4, mountH, 10), mat, 'hfBussardMount', 0, mountH / 2, 0)
+  const rimY = mountH + R * 0.02
+  const rim = hfMesh(group, new THREE.TorusGeometry(r, R * 0.03, 8, 24), mat, 'hfBussardRim', 0, rimY, 0)
+  rim.rotation.x = Math.PI / 2
+  const vanes = 8 + rng.int(0, 8) // 8-16
+  for (let k = 0; k < vanes; k++) {
+    const a = (k / vanes) * PI2
+    const vane = hfMesh(group, new THREE.BoxGeometry(r * 0.85, R * 0.02, R * 0.02), mat, 'hfBussardVane', Math.cos(a) * r * 0.5, rimY, Math.sin(a) * r * 0.5)
+    vane.rotation.y = -a
+  }
+  hfMesh(group, new THREE.CylinderGeometry(r * 0.25, r * 0.25, R * 0.06, 10), mat, 'hfBussardHub', 0, rimY, 0)
+  if (rng.chance(0.6)) hfMesh(group, new THREE.SphereGeometry(r * 0.18, 12, 8), glowMat, 'hfBussardCore', 0, rimY, 0)
+  return group
+}
+
+// rcsThrusters — a small mat manifold (box) with 3-4 small nozzle cones, 1-3 with
+// emissive tips. Reads as attitude control.
+function buildHullFeatureRcsThrusters(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:rcsThrusters'
+  const mw = R * 0.24
+  const mh = R * 0.14
+  hfMesh(group, new THREE.BoxGeometry(mw, mh, mw), mat, 'hfRcsManifold', 0, mh / 2, 0)
+  const n = 3 + rng.int(0, 2) // 3-4
+  const tips = 1 + rng.int(0, 2) // 1-3
+  for (let k = 0; k < n; k++) {
+    const ox = (rng.next() - 0.5) * mw * 0.7
+    const oz = (rng.next() - 0.5) * mw * 0.7
+    const nh = R * (0.15 + rng.next() * 0.12)
+    const nr = R * 0.05
+    const nozzle = hfMesh(group, new THREE.CylinderGeometry(nr, nr * 0.5, nh, 8), mat, 'hfRcsNozzle', ox, mh + nh / 2, oz)
+    if (k < tips) hfMesh(nozzle, new THREE.ConeGeometry(nr * 0.4, nh * 0.3, 8), glowMat, 'hfRcsTip', 0, nh / 2 + nh * 0.15, 0)
+  }
+  return group
+}
+
+// panelHatch — a recessed rectangular mat panel with a border frame, a small
+// handle, and 4-6 rivets; optional single glowMat status light. Reads as an
+// access door.
+function buildHullFeaturePanelHatch(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:panelHatch'
+  const w = R * 0.32
+  const d = R * 0.28
+  const h = R * 0.07
+  const ft = R * 0.04
+  // border frame (4 thin boxes on the top face)
+  hfMesh(group, new THREE.BoxGeometry(w, ft, ft), mat, 'hfHatchFrameTop', 0, h + ft / 2, d / 2 - ft / 2)
+  hfMesh(group, new THREE.BoxGeometry(w, ft, ft), mat, 'hfHatchFrameBottom', 0, h + ft / 2, -d / 2 + ft / 2)
+  hfMesh(group, new THREE.BoxGeometry(ft, ft, d), mat, 'hfHatchFrameL', -w / 2 + ft / 2, h + ft / 2, 0)
+  hfMesh(group, new THREE.BoxGeometry(ft, ft, d), mat, 'hfHatchFrameR', w / 2 - ft / 2, h + ft / 2, 0)
+  // recessed panel (slightly below the frame)
+  hfMesh(group, new THREE.BoxGeometry(w - ft, h * 0.5, d - ft), mat, 'hfHatchPanel', 0, h * 0.5, 0)
+  // handle
+  hfMesh(group, new THREE.BoxGeometry(w * 0.3, ft * 0.6, ft), mat, 'hfHatchHandle', 0, h + ft, 0)
+  // rivets (4-6)
+  const rivets = 4 + rng.int(0, 2)
+  const spots = [
+    [-w / 2 + ft, d / 2 - ft], [w / 2 - ft, d / 2 - ft],
+    [-w / 2 + ft, -d / 2 + ft], [w / 2 - ft, -d / 2 + ft],
+    [0, d / 2 - ft], [0, -d / 2 + ft],
+  ]
+  for (let k = 0; k < rivets; k++) {
+    const [rx, rz] = spots[k]
+    hfMesh(group, new THREE.SphereGeometry(R * 0.015, 6, 4), mat, 'hfHatchRivet', rx, h + ft * 0.5, rz)
+  }
+  if (rng.chance(0.5)) hfMesh(group, new THREE.BoxGeometry(R * 0.02, R * 0.02, R * 0.02), glowMat, 'hfHatchLight', w * 0.3, h + ft * 0.5, d * 0.3)
+  return group
+}
+
+// lightBank — a thin mat bar with a row of 3-6 small glowMat lights. Reads as
+// running lights.
+function buildHullFeatureLightBank(rng, b) {
+  const { mat, glowMat, R } = b
+  const group = new THREE.Group()
+  group.name = 'hf:lightBank'
+  const barW = R * 0.4
+  const barH = R * 0.06
+  const barD = R * 0.1
+  hfMesh(group, new THREE.BoxGeometry(barW, barH, barD), mat, 'hfLightBar', 0, barH / 2, 0)
+  const n = 3 + rng.int(0, 4) // 3-6
+  for (let k = 0; k < n; k++) {
+    const lx = (k - (n - 1) / 2) * (barW / (n + 1))
+    if (rng.chance(0.5)) {
+      hfMesh(group, new THREE.SphereGeometry(barH * 0.4, 8, 6), glowMat, 'hfLight', lx, barH + barH * 0.2, 0)
+    } else {
+      hfMesh(group, new THREE.BoxGeometry(barW / (n * 2), barH * 0.5, barD * 0.8), glowMat, 'hfLight', lx, barH + barH * 0.25, 0)
+    }
+  }
+  return group
+}
+
+// buildHullFeature — the MODULE_SPECS entry builder for hull features. Creates a
+// per-instance sub-rng (seeded by ship seed + instance index) so instance i is
+// fully determined by (seed, i) — independent of iteration order — and uses it
+// for BOTH the style resolution (so `mixed` picks a reproducible type per
+// instance, and the mirror twin matches) AND the geometry. Then orients + places
+// the local-frame group: `nose` points +Z at the nose tip (centreline); `body`
+// seats on the starboard flank normal to the surface (mirrored to port).
+function buildHullFeature(rng, ctx) {
+  const { mat, glowMat, hull, surface, fore } = ctx
+  const cfg = ctx.params.hullFeatures
+  const i = ctx.i
+  const n = ctx.n ?? 1
+  const t = ctx.t ?? 0.5
+  const s = cfg.size ?? 1
+  const irng = createRng((ctx.seed ?? 0) + i * HF_SEED_MULT)
+  const style = resolveHullFeatureStyle(cfg.style, irng)
+  const position = HULL_FEATURE_POSITIONS.includes(cfg.position) ? cfg.position : 'body'
+  const R = Math.min(hull.beam, hull.height) * s
+  const base = { mat, glowMat, hull, s, R }
+  let g
+  switch (style) {
+    case 'antennaCluster': g = buildHullFeatureAntennaCluster(irng, base); break
+    case 'dome': g = buildHullFeatureDome(irng, base); break
+    case 'roundel': g = buildHullFeatureRoundel(irng, base); break
+    case 'vent': g = buildHullFeatureVent(irng, base); break
+    case 'bussard': g = buildHullFeatureBussard(irng, base); break
+    case 'rcsThrusters': g = buildHullFeatureRcsThrusters(irng, base); break
+    case 'panelHatch': g = buildHullFeaturePanelHatch(irng, base); break
+    case 'lightBank': g = buildHullFeatureLightBank(irng, base); break
+    case 'greeble':
+    default: g = buildHullFeatureGreeble(irng, base); break
+  }
+  g.name = `hullFeature:${style}:${i}`
+  const embed = Math.max(0.1, 0.05 * s * Math.min(hull.beam, hull.height))
+  if (position === 'nose') {
+    // Nose: orient local +Y -> +Z (forward); seat the base just inside the nose
+    // tip so the feature protrudes forward. Centreline (excluded from the mirror).
+    orientLocalFrame(g, new THREE.Vector3(0, 0, 1))
+    g.position.set(0, 0, fore.z - embed)
+    g.userData.isCentreline = true
+  } else {
+    // Body: a deterministic starboard-half angle spread by instance index (i) and
+    // a z from the instance's t — both indexed by instance, giving a diagonal
+    // stagger across the flank. The port mirror comes from generateModules.
+    const thetaMin = -Math.PI / 2 + 0.15
+    const thetaMax = Math.PI / 2 - 0.15
+    const theta = n > 1 ? thetaMin + (thetaMax - thetaMin) * (i / (n - 1)) : 0
+    const z = lerp(-hull.length * 0.45, fore.z * 0.9, t)
+    const r = surface.surfaceRadiusAt(theta, z)
+    const normal = hullFeatureNormal(theta, z, surface, hull)
+    orientLocalFrame(g, normal)
+    g.position.set(Math.cos(theta) * r, Math.sin(theta) * r, z).addScaledVector(normal, -embed)
+  }
+  return g
+}
+
 const MODULE_SPECS = [
   { key: 'bridge', build: buildBridge, min: 0 },
   // The other multi-style families (bridge / commandSpike / sensorMast /
@@ -3745,6 +4228,10 @@ const MODULE_SPECS = [
   { key: 'sensorMast', build: buildSensorMast, min: 0.45 },
   { key: 'antenna', build: buildAntenna, min: 0.5 },
   { key: 'hangar', build: buildHangar, min: 0.6 },
+  // Hull features: flavour equipment, not the silhouette. Ramped like the other
+  // non-essential modules (min 0.3): present when enabled and density is high
+  // enough, count scaling with density.
+  { key: 'hullFeatures', build: buildHullFeature, min: 0.3 },
 ]
 
 function moduleCount(key, p, density, maxCount) {
@@ -3776,6 +4263,9 @@ function instanceTs(count, key, _rng) {
     weapons: [0.2, 0.85],
     sensorMast: [0.3, 0.8],
     antenna: [0.25, 0.9],
+    // Hull features span nearly the full hull length (the default [0.2, 0.8]
+    // would cluster them midship).
+    hullFeatures: [0.08, 0.92],
   }
   const [a, b] = spread[key] ?? [0.2, 0.8]
   const ts = []
@@ -3794,6 +4284,7 @@ export const MODULE_CATALOG = {
   sensorMast: buildSensorMast,
   antenna: buildAntenna,
   hangar: buildHangar,
+  hullFeatures: buildHullFeature,
 }
 
 export function generateModules(
@@ -3815,6 +4306,9 @@ export function generateModules(
     noseZ: hullInfo.noseZ ?? length / 2,
     sternZ: hullInfo.sternZ ?? -length / 2,
     archetype: hullInfo.archetype ?? 'blocky',
+    // Marks a freeform (skin) hull so buildHullFeature answers its surface
+    // normal from the radial direction (see hullFeatureNormal).
+    freeform: !!hullInfo.freeform,
   }
 
   // FIT GUARD: query the hull's real surface so module bases are seated on it
@@ -3866,7 +4360,10 @@ export function generateModules(
   // hangar) are flagged userData.isCentreline by their builder and are excluded
   // from the mirror. The per-builder placement is jitter-free (see instanceTs)
   // so the mirror is exact.
-  const PAIRED = new Set(['nacelles', 'weapons'])
+  // hullFeatures is paired (body features are mirrored across the centreline)
+  // EXCEPT in the 'nose' special-case below, which forces a single centreline
+  // feature (hfNose) so the nose feature is not doubled onto itself.
+  const PAIRED = new Set(['nacelles', 'weapons', 'hullFeatures'])
   const moduleGroup = new THREE.Group()
   moduleGroup.name = 'modules:half'
 
@@ -3889,7 +4386,16 @@ export function generateModules(
         maxCount = Math.min(maxCount, 1)
       }
     }
+    // Hull-feature nose: a single nose-tip feature (not a line of them). Cap the
+    // instance count at 1; the placement is fixed at the nose tip in
+    // buildHullFeature.
+    const hfNose = spec.key === 'hullFeatures' && (p.position ?? 'body') === 'nose'
+    if (hfNose) maxCount = 1
     let count = moduleCount(spec.key, p, density, maxCount)
+    // The nose feature bypasses the 0->1 density ramp (which would only reach 1
+    // near density ≈ 0.65): it is placed whenever enabled and above the min
+    // density, so a nose feature is reliably present when asked for.
+    if (hfNose) count = (p.enabled && density >= spec.min) ? 1 : 0
     if (count <= 0) continue
 
     // Nacelle count depends on the mount:
@@ -3926,7 +4432,7 @@ export function generateModules(
     // The waist nacelle is a single fixed pair (one pod per side), not a paired
     // module: skip the even-count forcing so count 1 yields buildCount 1 (one
     // pod in the half-group, mirrored to its twin).
-    const paired = PAIRED.has(spec.key) && !waistSingle && !bellySingle
+    const paired = PAIRED.has(spec.key) && !waistSingle && !bellySingle && !hfNose
     // For paired modules, the config's `count` is the TOTAL number of instances
     // (e.g. 4 = 2 per side). The half-group holds one side, so divide by 2 to
     // get the per-side count. The mirror handles the symmetry — no even-count

@@ -17,7 +17,7 @@
 // seeds give variety within the aesthetic. Ranges stay inside the schema bounds
 // so the resolved config always passes validateConfig.
 
-import { BRIDGE_STYLES, WEAPON_STYLES, WEAPON_POSITIONS, NACELLE_STRUT_STYLES, NACELLE_LIFT_OPTIONS, NACELLE_ANGLE_OPTIONS, NACELLE_TAIL_OPTIONS, NACELLE_MOUNTS, NACELLE_TYPES, HANGAR_STYLES, HANGAR_POSITIONS } from '../generator/modules.js'
+import { BRIDGE_STYLES, WEAPON_STYLES, WEAPON_POSITIONS, NACELLE_STRUT_STYLES, NACELLE_LIFT_OPTIONS, NACELLE_ANGLE_OPTIONS, NACELLE_TAIL_OPTIONS, NACELLE_MOUNTS, NACELLE_TYPES, HANGAR_STYLES, HANGAR_POSITIONS, HULL_FEATURE_POSITIONS } from '../generator/modules.js'
 
 // --- range descriptors (internal) --------------------------------------------
 // Each is a plain object the resolver understands. `kind` is optional when the
@@ -108,6 +108,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.6), count: N(1, 3, true) }),
         hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
+        hullFeatures: M({ enabled: B(0.6), count: N(2, 6, true), size: N(0.6, 1.0), style: C(['greeble', 'panelHatch', 'vent', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -133,7 +134,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Clean colonial / corporate. Long sleek hulls, white and light-grey, subtle wear, minimal modules, low accents.',
     params: {
       hull: {
-        archetype: C(['sleek', 'lance', 'twin']),
+        archetype: C(['sleek', 'lance', 'twin', 'pod', 'twinSkin']),
         length: N(45, 90),
         beam: N(10, 22),
         height: N(6, 14),
@@ -144,6 +145,7 @@ const AESTHETIC_DEFS = {
         keelOffset: N(0, 0.05),
         chamfer: N(0.2, 0.4),
         stations: N(14, 24, true),
+        skinWobble: N(0.05, 0.25),
       },
       modules: {
         density: N(0.2, 0.4),
@@ -154,6 +156,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.3), count: 1, height: N(2, 4) }),
         antenna: M({ enabled: B(0.4), count: C([0, 1]) }),
         hangar: M({ enabled: false, count: 0, position: C(HANGAR_POSITIONS) }),
+        hullFeatures: M({ enabled: B(0.3), count: N(1, 4, true), size: N(0.5, 0.9), style: C(['roundel', 'lightBank', 'vent', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -179,7 +182,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Biopunk. Rounded, asymmetric hulls in deep darks, greeble-heavy skin, bioluminescent glow accents.',
     params: {
       hull: {
-        archetype: C(['sleek', 'saucer', 'insect']),
+        archetype: C(['sleek', 'saucer', 'insect', 'pod', 'slug', 'cluster', 'insectSkin']),
         length: N(30, 60),
         beam: N(14, 30),
         height: N(8, 18),
@@ -190,6 +193,7 @@ const AESTHETIC_DEFS = {
         keelOffset: N(0.05, 0.2),
         chamfer: N(0.3, 0.5),
         stations: N(12, 22, true),
+        skinWobble: N(0.4, 0.8),
       },
       modules: {
         density: N(0.55, 0.85),
@@ -200,6 +204,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.6), count: C([1, 2]), height: N(3, 7), style: 'ring' }),
         antenna: M({ enabled: B(0.5), count: N(2, 4, true) }),
         hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
+        hullFeatures: M({ enabled: B(0.7), count: N(3, 8, true), size: N(0.6, 1.2), style: C(['dome', 'bussard', 'greeble', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -247,6 +252,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 4, true) }),
         hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
+        hullFeatures: M({ enabled: B(0.6), count: N(2, 6, true), size: N(0.7, 1.2), style: C(['dome', 'roundel', 'antennaCluster', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -272,7 +278,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Ornate dreadnought. Tall, dark silhouette, heavy greeble, prominent command spires, brooding palette.',
     params: {
       hull: {
-        archetype: C(['dreadnought', 'lance', 'disc', 'wedge', 'twin', 'insect']),
+        archetype: C(['dreadnought', 'lance', 'disc', 'wedge', 'twin', 'insect', 'cluster', 'slug']),
         length: N(60, 110),
         beam: N(24, 48),
         height: N(18, 34),
@@ -283,6 +289,7 @@ const AESTHETIC_DEFS = {
         keelOffset: N(0, 0.1),
         chamfer: N(0.1, 0.3),
         stations: N(16, 24, true),
+        skinWobble: N(0.3, 0.6),
       },
       modules: {
         density: N(0.65, 0.9),
@@ -293,6 +300,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.7), count: C([2, 4]), height: N(6, 10) }),
         antenna: M({ enabled: B(0.6), count: N(3, 6, true) }),
         hangar: M({ enabled: B(0.4), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
+        hullFeatures: M({ enabled: B(0.8), count: N(4, 10, true), size: N(0.8, 1.4), style: C(['antennaCluster', 'rcsThrusters', 'greeble', 'mixed']), position: C(HULL_FEATURE_POSITIONS) }),
       },
       texture: {
         palette: P([
@@ -318,7 +326,7 @@ const AESTHETIC_DEFS = {
     blurb: 'Monolithic minimalist. Smooth matte hulls, very few modules, no stripes or emblem, calm neutral palette.',
     params: {
       hull: {
-        archetype: C(['sleek', 'lance', 'blocky']),
+        archetype: C(['sleek', 'lance', 'blocky', 'pod', 'slug']),
         length: N(35, 70),
         beam: N(12, 26),
         height: N(8, 16),
@@ -329,6 +337,7 @@ const AESTHETIC_DEFS = {
         keelOffset: N(0, 0.05),
         chamfer: N(0.35, 0.55),
         stations: N(12, 20, true),
+        skinWobble: N(0.0, 0.15),
       },
       modules: {
         density: N(0.1, 0.25),
@@ -339,6 +348,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: false, count: 0, height: 1 }),
         antenna: M({ enabled: false, count: 0 }),
         hangar: M({ enabled: false, count: 0, position: C(HANGAR_POSITIONS) }),
+        hullFeatures: M({ enabled: B(0.2), count: N(0, 2, true), size: N(0.5, 0.8), style: C(['lightBank', 'roundel', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -385,6 +395,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 5, true) }),
         hangar: M({ enabled: B(0.85), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
+        hullFeatures: M({ enabled: B(0.85), count: N(4, 10, true), size: N(0.7, 1.3), style: C(['greeble', 'panelHatch', 'vent', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -430,6 +441,7 @@ const AESTHETIC_DEFS = {
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(2, 5) }),
         antenna: M({ enabled: B(0.5), count: N(0, 3, true) }),
         hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
+        hullFeatures: M({ enabled: B(0.5), count: N(2, 6, true), size: N(0.6, 1.2), style: 'mixed', position: 'body' }),
       },
       texture: {
         palette: P([

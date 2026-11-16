@@ -19,6 +19,11 @@ const HULL_SCHEMA = [
   { key: 'discUpperCurve', label: 'Disc upper curve', type: 'select', options: ['convex', 'concave'] },
   { key: 'discLowerCurve', label: 'Disc lower curve', type: 'select', options: ['convex', 'concave'] },
   { key: 'discEdge', label: 'Disc edge', type: 'select', options: ['cylinder', 'frustum'] },
+  // Skin archetype params (pod/slug/cluster/twinSkin/insectSkin).
+  { key: 'skinWobble', label: 'Skin wobble', type: 'slider', min: 0, max: 1, step: 0.01 },
+  { key: 'skinRipple', label: 'Skin ripple', type: 'slider', min: 2, max: 8, step: 1, int: true },
+  { key: 'lobeCount', label: 'Lobes (cluster)', type: 'slider', min: 2, max: 5, step: 1, int: true },
+  { key: 'lobeSize', label: 'Lobe size', type: 'slider', min: 0.15, max: 0.6, step: 0.01 },
 ]
 
 registerHarness({
