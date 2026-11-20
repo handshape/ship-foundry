@@ -360,20 +360,24 @@ function drawOrganic(ctx, size, rng, base, secondary, glow, style) {
       )
     }
   } else if (style === 'scales') {
-    // Overlapping arc pattern (fish scales / armored plates).
+    // Overlapping arc pattern (fish scales / armored plates). The canvas x axis
+    // is the hull's fore-aft length (UV.u) and y is girth (UV.v), so a 90°
+    // rotation makes each arc bulge along the length axis — the way scales
+    // overlap along an animal's body. Rows run fore-to-aft, alternating rows
+    // offset along the girth.
     const scaleW = size * rng.range(0.06, 0.1)
     const scaleH = scaleW * 0.6
-    for (let row = 0; row < size / scaleH + 2; row++) {
-      const offset = row % 2 === 0 ? 0 : scaleW * 0.5
-      for (let col = -1; col < size / scaleW + 2; col++) {
-        const cx = col * scaleW + offset
-        const cy = row * scaleH
+    for (let col = 0; col < size / scaleH + 2; col++) {
+      const offset = col % 2 === 0 ? 0 : scaleW * 0.5
+      for (let row = -1; row < size / scaleW + 2; row++) {
+        const cx = col * scaleH
+        const cy = row * scaleW + offset
         const shade = rng.range(-0.08, 0.08)
         const [r, g, b] = mix(secondary, shade >= 0 ? '#ffffff' : '#000000', Math.abs(shade))
         ctx.strokeStyle = rgba(r, g, b, 0.4)
         ctx.lineWidth = Math.max(1, scaleW * 0.08)
         ctx.beginPath()
-        ctx.arc(cx, cy, scaleW * 0.5, 0, Math.PI)
+        ctx.arc(cx, cy, scaleW * 0.5, -Math.PI / 2, Math.PI / 2)
         ctx.stroke()
       }
     }
@@ -897,21 +901,22 @@ function buildNormalMap(size, rng, p) {
         )
       }
     } else if (p.organic.style === 'scales') {
-      // Raised scale bumps: each arc is a small dome.
+      // Raised scale bumps: each arc is a small dome, rotated 90° to match the
+      // albedo so the relief follows the hull's length axis (see drawOrganic).
       const scaleW = size * oRng.range(0.06, 0.1)
       const scaleH = scaleW * 0.6
-      for (let row = 0; row < size / scaleH + 2; row++) {
-        const offset = row % 2 === 0 ? 0 : scaleW * 0.5
-        for (let col = -1; col < size / scaleW + 2; col++) {
+      for (let col = 0; col < size / scaleH + 2; col++) {
+        const offset = col % 2 === 0 ? 0 : scaleW * 0.5
+        for (let row = -1; row < size / scaleW + 2; row++) {
           oRng.range(-0.08, 0.08) // skip shade (used in albedo)
-          const cx = col * scaleW + offset
-          const cy = row * scaleH
+          const cx = col * scaleH
+          const cy = row * scaleW + offset
           const rad = scaleW * 0.4
-          const g = nctx.createRadialGradient(cx, cy - rad * 0.3, 0, cx, cy - rad * 0.3, rad)
+          const g = nctx.createRadialGradient(cx - rad * 0.3, cy, 0, cx - rad * 0.3, cy, rad)
           g.addColorStop(0, 'rgba(128,180,255,0.4)')
           g.addColorStop(1, 'rgba(128,128,255,0)')
           nctx.fillStyle = g
-          nctx.fillRect(cx - rad, cy - rad * 1.5, rad * 2, rad * 2)
+          nctx.fillRect(cx - rad * 1.5, cy - rad, rad * 2, rad * 2)
         }
       }
     }

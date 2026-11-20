@@ -83,9 +83,7 @@ const SLUG_MEANDER_MAX = 0.4
 // Radial wobble is bounded to this fraction of the local cage radius so the
 // surface cannot cross the axis (self-intersection).
 const SKIN_WOBBLE_MAX = 0.35
-// Lobe blob tessellation (cluster): sphere segments per lobe.
-const LOBE_SEGMENTS = 20
-const LOBE_RINGS = 14
+
 
 // Nose taper tuning (shared by the lofted body and the nose dome cap).
 const NOSE_TIP_RADIUS = 0.22 // full-nose tip radius (fraction of girth)
@@ -448,6 +446,7 @@ function buildDiscSolid(params, discParams = {}) {
   const radius = beam / 2
   const upperCurve = discParams.upperCurve === 'concave' ? 'concave' : 'convex'
   const lowerCurve = discParams.lowerCurve === 'concave' ? 'concave' : 'convex'
+  const edge = discParams.edge === 'frustum' ? 'frustum' : 'cylinder'
   const upperPeak = height * 0.5
   const lowerPeak = height * 0.5
   const upperEdgeY = height * 0.12
@@ -455,7 +454,13 @@ function buildDiscSolid(params, discParams = {}) {
 
   // Profile traced bottom-to-top (required for outward normals in LatheGeometry):
   // lower surface center→edge, up the edge, upper surface edge→center.
+  // The EDGE shape (discParams.edge) controls the side wall between the lower
+  // and upper surfaces at the rim:
+  //   cylinder -> a short rounded (semicircular) edge (the default look).
+  //   frustum  -> a straight vertical wall (a flat side, like a frustum/lathe
+  //               with a cylindrical band).
   const N = 32
+  const NE = 8 // edge sample count
   const points = []
   // Lower surface: center (r=0, y=-lowerPeak) to edge (r=radius, y=lowerEdgeY).
   for (let i = 0; i <= N; i++) {
@@ -469,8 +474,30 @@ function buildDiscSolid(params, discParams = {}) {
     }
     points.push(new THREE.Vector2(r, y))
   }
+  // Edge: from the lower rim (r=radius, y=lowerEdgeY) up to the upper rim
+  // (r=radius, y=upperEdgeY). The radius stays at the rim; the Y profile is
+  // either a straight wall (frustum) or a rounded semicircular bulge
+  // (cylinder) that swells slightly outboard before returning to the rim.
+  const edgeDy = upperEdgeY - lowerEdgeY
+  for (let i = 1; i <= NE; i++) {
+    const t = i / NE
+    let r, y
+    if (edge === 'frustum') {
+      // Straight vertical wall: constant radius, linear Y.
+      r = radius
+      y = lowerEdgeY + edgeDy * t
+    } else {
+      // Rounded edge: a semicircular bulge. The radius swells outboard by a
+      // small amount (a fraction of the edge height) at the midpoint, then
+      // returns to the rim radius. Y is linear.
+      const bulge = edgeDy * 0.15
+      r = radius + bulge * Math.sin(t * Math.PI)
+      y = lowerEdgeY + edgeDy * t
+    }
+    points.push(new THREE.Vector2(r, y))
+  }
   // Upper surface: edge (r=radius, y=upperEdgeY) to center (r=0, y=upperPeak).
-  for (let i = N; i >= 0; i--) {
+  for (let i = N; i >= 1; i--) {
     const t = i / N
     const r = t * radius
     let y
@@ -923,52 +950,104 @@ function buildSlug(params, profile, rng) {
   return g
 }
 
-// A seeded smooth blob (a SphereGeometry with per-vertex smooth radial
-// displacement) used for the cluster's lobes.
-function buildLobe(rng, { r, smoothFreq = 2 }) {
-  const geo = new THREE.SphereGeometry(r, LOBE_SEGMENTS, LOBE_RINGS)
-  const pos = geo.attributes.position
-  // Seeded wave params (fixed consumption order): 3 waves, each (phU, phV,
-  // wgt). The displacement is a smooth function of the vertex direction so
-  // the blob stays smooth (no faceting) and deterministic.
-  const waves = []
-  for (let w = 0; w < 3; w++) {
-    waves.push({
-      phU: rng.range(0, Math.PI * 2),
-      phV: rng.range(0, Math.PI * 2),
-      wgt: rng.range(0.3, 1),
-    })
-  }
-  const v = new THREE.Vector3()
-  for (let i = 0; i < pos.count; i++) {
-    v.fromBufferAttribute(pos, i).normalize()
-    // Spherical angles of the unit direction.
-    const theta = Math.atan2(v.y, Math.hypot(v.x, v.z)) // -PI..PI
-    const phi = Math.acos(clamp(v.z / r, -1, 1)) // 0..PI (from +Z)
-    let sum = 0
-    let wsum = 0
-    for (const w of waves) {
-      sum += w.wgt * Math.sin(smoothFreq * theta + w.phU) * Math.sin(smoothFreq * phi + w.phV)
-      wsum += w.wgt
+// Add smooth lobe bulges to a cluster skin control cage. Each lobe displaces
+// the cage radially (outward from the origin) by a smooth Gaussian bump
+// centered at the lobe's (s, angle) position, so the NURBS surface swells into
+// a rounded bulge there. The bulges fuse into the skin as part of the control
+// surface rather than as separate meshes. `lobes` is an array of { sFrac,
+// angle, size } (the same values used to position the old separate lobe
+// meshes). Must be called AFTER buildSkinCage's main cage is built but BEFORE
+// the terminal-ring collapse, so the bulges don't fight the tip taper.
+function applyLobeBulges(cage, profile, { beam, height, noseTaper, sternTaper, lobes, mainScale }) {
+  const S = cage.length
+  const m = profile.length - 1
+  // Lobe radius (fraction of the local cage radius) for each lobe. A lobe
+  // whose `size` is a fraction of min(beam, height) maps to a radial bulge
+  // amplitude of (size / localRadius) at its center; we cap the amplitude so a
+  // lobe can't push the surface past the SKIN_WOBBLE_MAX self-intersection
+  // bound relative to the local cage radius.
+  const amp = lobes.map((l) => {
+    const sFrac = 0.5 + l.sFrac
+    const { sx, sy } = skinLengthScales(sFrac, { noseTaper, sternTaper })
+    const localBeam = beam * mainScale * sx
+    const localHeight = height * mainScale * sy
+    const ca = Math.cos(l.angle)
+    const sa = Math.sin(l.angle)
+    const denom = (ca * ca) / (localBeam * localBeam) + (sa * sa) / (localHeight * localHeight)
+    const skinR = denom > 1e-9 ? 1 / Math.sqrt(denom) : localBeam
+    return clamp(l.size / skinR, 0, SKIN_WOBBLE_MAX * 0.8)
+  })
+  // Angular half-width of the lobe's influence (radians). Wider for bigger
+  // lobes so the bulge is smooth, not a spike.
+  const angW = lobes.map((l) => Math.max(0.35, Math.PI / 6 + (l.size / (Math.min(beam, height) * 0.35)) * 0.5))
+  // Longitudinal half-width of the lobe's influence (s-fraction).
+  const sW = lobes.map(() => 0.12)
+  for (let si = 0; si < S; si++) {
+    const sFrac = si / (S - 1)
+    for (let gi = 0; gi < m; gi++) {
+      // Girth angle of this cage point (the cage's base girth is the profile
+      // scaled per station, so the angle is the profile's polar angle).
+      const baseR = Math.hypot(profile[gi].x * beam, profile[gi].y * height)
+      const gAngle = baseR > 1e-9 ? Math.atan2(profile[gi].y * height, profile[gi].x * beam) : 0
+      const p = cage[si][gi]
+      // Accumulate the radial bulge from every lobe at this cage point.
+      let bump = 0
+      for (let k = 0; k < lobes.length; k++) {
+        const ds = sFrac - (0.5 + lobes[k].sFrac)
+        const du = Math.abs(ds) / sW[k]
+        // Angular distance (wrapped to [-PI, PI]).
+        let da = gAngle - lobes[k].angle
+        da = Math.atan2(Math.sin(da), Math.cos(da))
+        const dv = Math.abs(da) / angW[k]
+        const g = Math.exp(-(du * du + dv * dv)) // smooth 2D Gaussian
+        bump += amp[k] * g
+      }
+      if (bump === 0) continue
+      // Displace the cage point radially outward from the origin by `bump`
+      // (a fraction of the point's current radius). This keeps the surface
+      // away from the axis (bump <= bound) so the origin stays inside the
+      // cross-section (the freeform radial-sector invariant).
+      const r = Math.hypot(p.x, p.y)
+      if (r < 1e-9) continue
+      const f = 1 + bump
+      p.x *= f
+      p.y *= f
     }
-    const disp = 1 + 0.25 * (sum / wsum) // bounded: +/-25% of r
-    pos.setXYZ(i, v.x * r * disp, v.y * r * disp, v.z * r * disp)
   }
-  geo.computeVertexNormals()
-  return geo
 }
 
-// Cluster: a slimmer pod-style main skin + lobeCount seeded lobe blobs whose
-// bases sit slightly inside the main-skin surface so they fuse into it. The
-// main skin obeys the invariants; the lobes sit ON the surface (they may
-// bulge beyond the envelope, which the geometry-derived envelope captures).
+// Cluster: a slimmer pod-style main skin whose control cage is deformed by
+// lobeCount smooth radial bulges (one per lobe), so the lobes fuse into the
+// NURBS surface as rounded bumps rather than separate meshes. The main skin
+// obeys the freeform invariants (the bulges are bounded so the origin stays
+// inside every cross-section); the geometry-derived envelope captures the
+// bulges' extra extent.
 function buildCluster(params, profile, rng) {
   const { beam, height, length, noseTaper, sternTaper, skinWobble, skinRipple, lobeCount, lobeSize } = params
-  // Main skin: slimmer (0.78 of the configured beam/height) so the lobes read
-  // as distinct bulges rather than the whole body.
+  const mainScale = 0.78 // main skin is slimmer so the lobes read as bulges
+  const lobeRBase = Math.min(beam, height) * lobeSize
+  // Seed the lobe parameters first (fixed order) so the cage can be deformed
+  // by them. Each lobe consumes rng in a fixed order: sFrac, angle, size.
+  const lobes = []
+  for (let k = 0; k < lobeCount; k++) {
+    lobes.push({
+      sFrac: rng.range(-0.35, 0.35),
+      angle: rng.range(0, Math.PI * 2),
+      size: lobeRBase * rng.range(0.7, 1.3),
+    })
+  }
+  // Build the main skin cage (buildSkinCage consumes the wobble field +
+  // meander from the rng, then collapses the terminal rings).
   const mainCage = buildSkinCage(profile, {
-    beam: beam * 0.78, height: height * 0.78, length, noseTaper, sternTaper,
+    beam: beam * mainScale, height: height * mainScale, length, noseTaper, sternTaper,
     wobble: skinWobble * 0.6, ripple: skinRipple, meander: 0, rng,
+  })
+  // Deform the cage with the lobe bulges. This must run after buildSkinCage
+  // (which collapses the terminal rings) — the bulges only affect the interior
+  // stations (sFrac in [0.15, 0.85] from the seeded range), so they don't
+  // disturb the collapsed tips.
+  applyLobeBulges(mainCage, profile, {
+    beam, height, noseTaper, sternTaper, lobes, mainScale,
   })
   const mainSurface = createSurface(mainCage, { periodicV: true })
   const mainGeo = tessellate(mainSurface, { rings: SKIN_RINGS, girth: SKIN_GIRTH })
@@ -977,35 +1056,6 @@ function buildCluster(params, profile, rng) {
   const g = new THREE.Group()
   g.name = 'hull'
   g.add(mainMesh)
-
-  // Lobes: fixed order (k = 0..lobeCount-1), each consuming rng in a fixed
-  // order (centerS, angle, depth, size, then the lobe displacement field).
-  const lobeRBase = Math.min(beam, height) * lobeSize
-  for (let k = 0; k < lobeCount; k++) {
-    // Seeded center: s (length fraction), girth angle, radial depth.
-    const sFrac = rng.range(-0.35, 0.35)
-    const angle = rng.range(0, Math.PI * 2)
-    const depth = rng.range(0.82, 0.95) // slightly inside the main-skin surface
-    const size = lobeRBase * rng.range(0.7, 1.3)
-    const cz = -length / 2 + (0.5 + sFrac) * length
-    // Main-skin radius at this station (approx: the cage's local scale).
-    const { sx, sy } = skinLengthScales(0.5 + sFrac, { noseTaper, sternTaper })
-    const localBeam = beam * 0.78 * sx
-    const localHeight = height * 0.78 * sy
-    // Radial distance of the main skin in the lobe's angle direction
-    // (ellipse-ish from the section scales).
-    const ca = Math.cos(angle)
-    const sa = Math.sin(angle)
-    const denom = (ca * ca) / (localBeam * localBeam) + (sa * sa) / (localHeight * localHeight)
-    const skinR = denom > 1e-9 ? 1 / Math.sqrt(denom) : localBeam
-    const cx = ca * skinR * depth
-    const cy = sa * skinR * depth
-    const lobeGeo = buildLobe(rng, { r: size })
-    const lobe = new THREE.Mesh(lobeGeo)
-    lobe.position.set(cx, cy, cz)
-    lobe.name = `hull:skin:lobe:${k}`
-    g.add(lobe)
-  }
   return g
 }
 

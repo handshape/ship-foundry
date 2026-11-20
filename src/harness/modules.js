@@ -7,7 +7,6 @@ import {
   ANTENNA_STYLES,
   HANGAR_STYLES,
   HANGAR_POSITIONS,
-  WEAPON_STYLES,
   WEAPON_POSITIONS,
   NACELLE_STRUT_STYLES,
   NACELLE_LIFT_OPTIONS,
@@ -50,7 +49,6 @@ const MODULES_SCHEMA = [
   { key: 'weaponsEnabled', label: 'Weapons', type: 'toggle' },
   { key: 'weaponsCount', label: 'Weapon count', type: 'number', min: 0, max: 8, step: 1, int: true },
   { key: 'weaponsSize', label: 'Weapon size', type: 'slider', min: 0.5, max: 2, step: 0.01 },
-  { key: 'weaponsStyle', label: 'Weapon style', type: 'select', options: WEAPON_STYLES },
   { key: 'weaponsPosition', label: 'Weapon position', type: 'select', options: WEAPON_POSITIONS },
   // sensorMast
   { key: 'sensorMastEnabled', label: 'Sensor mast', type: 'toggle' },
@@ -98,7 +96,6 @@ function flattenModules(m) {
     weaponsEnabled: m.weapons?.enabled,
     weaponsCount: m.weapons?.count,
     weaponsSize: m.weapons?.size,
-    weaponsStyle: m.weapons?.style,
     weaponsPosition: m.weapons?.position,
     sensorMastEnabled: m.sensorMast?.enabled,
     sensorMastCount: m.sensorMast?.count,
@@ -136,7 +133,7 @@ function unflattenModules(flat) {
   nest('bridge', [['bridgeEnabled', 'enabled'], ['bridgeSize', 'size'], ['bridgeStyle', 'style'], ['bridgePosition', 'position']])
   nest('commandSpike', [['commandSpikeEnabled', 'enabled'], ['commandSpikeHeight', 'height'], ['commandSpikeStyle', 'style']])
   nest('nacelles', [['nacellesEnabled', 'enabled'], ['nacellesCount', 'count'], ['nacellesSize', 'size'], ['nacellesStrut', 'strut'], ['nacellesLift', 'lift'], ['nacellesAngle', 'angle'], ['nacellesTail', 'tail'], ['nacellesMount', 'mount'], ['nacellesType', 'type']])
-  nest('weapons', [['weaponsEnabled', 'enabled'], ['weaponsCount', 'count'], ['weaponsSize', 'size'], ['weaponsStyle', 'style'], ['weaponsPosition', 'position']])
+  nest('weapons', [['weaponsEnabled', 'enabled'], ['weaponsCount', 'count'], ['weaponsSize', 'size'], ['weaponsPosition', 'position']])
   nest('sensorMast', [['sensorMastEnabled', 'enabled'], ['sensorMastCount', 'count'], ['sensorMastHeight', 'height'], ['sensorMastStyle', 'style']])
   nest('antenna', [['antennaEnabled', 'enabled'], ['antennaCount', 'count'], ['antennaStyle', 'style']])
   nest('hangar', [['hangarEnabled', 'enabled'], ['hangarCount', 'count'], ['hangarStyle', 'style'], ['hangarPosition', 'position']])

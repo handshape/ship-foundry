@@ -232,6 +232,14 @@ export function createViewport(container, { preset = 'three-quarter', antialias 
     controls.update()
   }
 
+  // Re-frame the camera on the current ship without disposing/re-adding it.
+  // Use this when the ship's contents change in place (e.g. a harness swaps
+  // children of a persistent group) instead of calling setShip again (which
+  // disposes the group's geometries/materials).
+  const reFrame = () => {
+    if (ship) doFrame()
+  }
+
   // Toggle the ship's transparency. When `on`, every ship material becomes
   // semi-transparent (opacity 0.5, depthWrite off) so the interior is visible;
   // when off, materials return to fully opaque. `opacity` is optional (default
@@ -312,6 +320,7 @@ export function createViewport(container, { preset = 'three-quarter', antialias 
     camera,
     controls,
     setShip,
+    reFrame,
     setCameraPreset,
     setTransparency,
     startLoop,

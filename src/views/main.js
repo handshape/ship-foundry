@@ -13,7 +13,6 @@ import { HULL_ARCHETYPES, HULL_SECTIONS } from '../core/generator/hull.js'
 import {
   BRIDGE_STYLES,
   COMMAND_SPIKE_STYLES,
-  WEAPON_STYLES,
   SENSOR_MAST_STYLES,
   ANTENNA_STYLES,
   HANGAR_STYLES,
@@ -127,7 +126,6 @@ const MODULE_FIELD_LABELS = {
 const MODULE_FIELD_OPTIONS = {
   'bridge.style': BRIDGE_STYLES,
   'commandSpike.style': COMMAND_SPIKE_STYLES,
-  'weapons.style': WEAPON_STYLES,
   'weapons.position': WEAPON_POSITIONS,
   'nacelles.strut': NACELLE_STRUT_STYLES,
   'nacelles.lift': NACELLE_LIFT_OPTIONS.map((v) => ({ value: v, label: v === 0 ? 'Level' : v === 1 ? 'High' : `Mid (${v})` })),

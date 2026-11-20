@@ -41,7 +41,7 @@ export function generateShip(config = {}, seed) {
   //   - moduleMaterial: no emissive map — nacelles, bridges, weapons, etc.
   // Both share the same texture maps (albedo, roughness, metalness, normal, AO)
   // so the surface detail is identical; only the emissive differs.
-  const textures = generateTextures({ ...cfg.texture, color: cfg.texture.palette?.[0] })
+  const textures = generateTextures({ ...cfg.texture, color: cfg.texture.palette?.[0], seed: effectiveSeed })
   const glowColor = cfg.texture.palette?.[3] ?? null
   const hullMaterial = createShipMaterial(textures, { emissive: glowColor })
   const moduleMaterial = createShipMaterial(textures, { emissive: null })

@@ -17,7 +17,7 @@
 // seeds give variety within the aesthetic. Ranges stay inside the schema bounds
 // so the resolved config always passes validateConfig.
 
-import { BRIDGE_STYLES, WEAPON_STYLES, WEAPON_POSITIONS, NACELLE_STRUT_STYLES, NACELLE_LIFT_OPTIONS, NACELLE_ANGLE_OPTIONS, NACELLE_TAIL_OPTIONS, NACELLE_MOUNTS, NACELLE_TYPES, HANGAR_STYLES, HANGAR_POSITIONS, HULL_FEATURE_POSITIONS } from '../generator/modules.js'
+import { BRIDGE_STYLES, WEAPON_POSITIONS, NACELLE_STRUT_STYLES, NACELLE_LIFT_OPTIONS, NACELLE_ANGLE_OPTIONS, NACELLE_TAIL_OPTIONS, NACELLE_MOUNTS, NACELLE_TYPES, HANGAR_STYLES, HANGAR_POSITIONS, HULL_FEATURE_POSITIONS } from '../generator/modules.js'
 
 // --- range descriptors (internal) --------------------------------------------
 // Each is a plain object the resolver understands. `kind` is optional when the
@@ -104,11 +104,11 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(0.8, 1.4), position: N(0.35, 0.65) }),
         commandSpike: M({ enabled: B(0.4), height: N(4, 8) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 1.0), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: true, count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: true, count: N(2, 5, true), size: N(0.8, 1.4), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.6), count: N(1, 3, true) }),
         hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
-        hullFeatures: M({ enabled: B(0.6), count: N(2, 6, true), size: N(0.6, 1.0), style: C(['greeble', 'panelHatch', 'vent', 'mixed']), position: 'body' }),
+        hullFeatures: M({ enabled: B(0.6), count: N(2, 6, true), size: N(0.6, 1.0), style: C(['greeble', 'panelHatch', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -152,11 +152,11 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(0.7, 1.2), style: C(BRIDGE_STYLES), position: N(0.35, 0.65) }),
         commandSpike: M({ enabled: B(0.2), height: N(2, 5) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 0.9), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: B(0.4), count: C([0, 1, 2]), size: N(0.5, 0.9), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: B(0.4), count: C([0, 1, 2]), size: N(0.5, 0.9), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.3), count: 1, height: N(2, 4) }),
         antenna: M({ enabled: B(0.4), count: C([0, 1]) }),
         hangar: M({ enabled: false, count: 0, position: C(HANGAR_POSITIONS) }),
-        hullFeatures: M({ enabled: B(0.3), count: N(1, 4, true), size: N(0.5, 0.9), style: C(['roundel', 'lightBank', 'vent', 'mixed']), position: 'body' }),
+        hullFeatures: M({ enabled: B(0.3), count: N(1, 4, true), size: N(0.5, 0.9), style: C(['roundel', 'lightBank', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -200,11 +200,11 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(0.9, 1.5), style: C(BRIDGE_STYLES), position: N(0.3, 0.7) }),
         commandSpike: M({ enabled: B(0.4), height: N(3, 7) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 1.1), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: B(0.5), count: N(2, 6, true), size: N(0.7, 1.3), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: B(0.5), count: N(2, 6, true), size: N(0.7, 1.3), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.6), count: C([1, 2]), height: N(3, 7), style: 'ring' }),
         antenna: M({ enabled: B(0.5), count: N(2, 4, true) }),
         hangar: M({ enabled: B(0.3), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
-        hullFeatures: M({ enabled: B(0.7), count: N(3, 8, true), size: N(0.6, 1.2), style: C(['dome', 'bussard', 'greeble', 'mixed']), position: 'body' }),
+        hullFeatures: M({ enabled: B(0.7), count: N(3, 8, true), size: N(0.6, 1.2), style: C(['dome', 'greeble', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -248,7 +248,7 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(1.0, 1.8), style: C(BRIDGE_STYLES), position: N(0.35, 0.65) }),
         commandSpike: M({ enabled: B(0.4), height: N(4, 9), style: 'dish' }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.6, 1.2), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: B(0.5), count: N(2, 5, true), size: N(0.8, 1.4), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: B(0.5), count: N(2, 5, true), size: N(0.8, 1.4), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 4, true) }),
         hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
@@ -296,7 +296,7 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(1.2, 2), style: C(BRIDGE_STYLES), position: N(0.35, 0.65) }),
         commandSpike: M({ enabled: true, height: N(10, 15), style: 'array' }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.6, 1.1), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: true, count: N(2, 6, true), size: N(1.0, 1.8), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: true, count: N(2, 6, true), size: N(1.0, 1.8), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.7), count: C([2, 4]), height: N(6, 10) }),
         antenna: M({ enabled: B(0.6), count: N(3, 6, true) }),
         hangar: M({ enabled: B(0.4), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
@@ -391,11 +391,11 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(1.0, 1.6), style: C(BRIDGE_STYLES), position: N(0.35, 0.65) }),
         commandSpike: M({ enabled: B(0.5), height: N(4, 8) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.6, 1.1), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: B(0.4), count: N(1, 4, true), size: N(0.7, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: B(0.4), count: N(1, 4, true), size: N(0.7, 1.2), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(3, 6) }),
         antenna: M({ enabled: B(0.7), count: N(2, 5, true) }),
         hangar: M({ enabled: B(0.85), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),
-        hullFeatures: M({ enabled: B(0.85), count: N(4, 10, true), size: N(0.7, 1.3), style: C(['greeble', 'panelHatch', 'vent', 'mixed']), position: 'body' }),
+        hullFeatures: M({ enabled: B(0.85), count: N(4, 10, true), size: N(0.7, 1.3), style: C(['greeble', 'panelHatch', 'mixed']), position: 'body' }),
       },
       texture: {
         palette: P([
@@ -437,7 +437,7 @@ const AESTHETIC_DEFS = {
         bridge: M({ enabled: true, size: N(0.7, 1.4), style: C(BRIDGE_STYLES), position: N(0.35, 0.65) }),
         commandSpike: M({ enabled: B(0.5), height: N(3, 8) }),
         nacelles: M({ enabled: true, count: C([2, 2, 2, 4, 4]), size: N(0.5, 1.0), strut: C(NACELLE_STRUT_STYLES), lift: C(NACELLE_LIFT_OPTIONS), angle: C(NACELLE_ANGLE_OPTIONS), tail: C(NACELLE_TAIL_OPTIONS), mount: C(NACELLE_MOUNTS), type: C(NACELLE_TYPES) }),
-        weapons: M({ enabled: B(0.6), count: N(0, 4, true), size: N(0.6, 1.2), style: C(WEAPON_STYLES), position: C(WEAPON_POSITIONS) }),
+        weapons: M({ enabled: B(0.6), count: N(0, 4, true), size: N(0.6, 1.2), position: C(WEAPON_POSITIONS) }),
         sensorMast: M({ enabled: B(0.5), count: C([1, 2]), height: N(2, 5) }),
         antenna: M({ enabled: B(0.5), count: N(0, 3, true) }),
         hangar: M({ enabled: B(0.2), count: 1, position: C(HANGAR_POSITIONS), style: C(HANGAR_STYLES) }),

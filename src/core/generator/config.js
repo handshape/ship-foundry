@@ -27,7 +27,6 @@
 import { HULL_ARCHETYPES, HULL_SECTIONS, DEFAULT_LENGTH, DEFAULT_BEAM, DEFAULT_HEIGHT } from './hull.js'
 import {
   BRIDGE_STYLES,
-  WEAPON_STYLES,
   WEAPON_POSITIONS,
   NACELLE_STRUT_STYLES,
   NACELLE_LIFT_OPTIONS,
@@ -162,11 +161,11 @@ export const SHIP_CONFIG_SCHEMA = {
           enabled: flag(true),
           count: num(0, 8, 3, true),
           size: num(0.5, 2, 1),
-          style: choice(WEAPON_STYLES, 'turret'),
           // WHERE on the hull the weapons are mounted (the barrel still always
           // points along +Z, the travel axis). `top` is the classic deck ring;
           // `chin` is the forward-bottom (under the nose); `belly` is the
-          // ventral keel line.
+          // ventral keel line. The weapon's own geometry is always a random
+          // modular assortment (mount + barrels + tip), rolled per weapon.
           position: choice(WEAPON_POSITIONS, 'top'),
         },
       },
@@ -254,6 +253,16 @@ export const SHIP_CONFIG_SCHEMA = {
             ],
             'roundel',
           ),
+        },
+      },
+      // Organic texture layer (voronoi / veins / scales): a biopunk-style
+      // surface detail drawn under the panel lines. Off by default; the
+      // organic aesthetic enables it.
+      organic: {
+        type: 'object',
+        children: {
+          enabled: flag(false),
+          style: choice(['voronoi', 'veins', 'scales'], 'voronoi'),
         },
       },
       windows: {

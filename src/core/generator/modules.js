@@ -38,6 +38,11 @@ const POD_TAPER = 0.92
 // it seats flush rather than floating.
 const WEAPON_EMBED = 0.18
 
+// Minimum barrel length (×len). Guards against a zero-height (degenerate) barrel
+// cylinder when the length rolls to a recessed emitter. 0.02 is just a sliver —
+// the barrel reads as flush/recessed with only the tip visible.
+const BARREL_MIN_LENGTH_FRAC = 0.02
+
 // Fit-guard embed: the floor + fraction used by bridge, commandSpike,
 // sensorMast, and antenna to keep modules from clipping through the hull.
 const EMBED_FLOOR = 0.1
@@ -87,13 +92,14 @@ export const NACELLE_STRUT_STYLES = ['forward', 'straight', 'aft']
 // enough to clear the hull's tapered flank at the pod's fore end.
 export const NACELLE_LIFT_OPTIONS = [0, 0.35, 0.7, 1]
 
-// Nacelle pod angle options: the pod's pitch about its outboard (X) axis, so a
-// nacelle can be banked up, held level, or banked down along the travel axis.
-// This helps paired nacelles clear each other (e.g. one pair level, the next
-// pair angled). A missing/invalid value falls back to 'level' in buildNacelle.
-//   up    -> fore end raised (pod noses up)
-//   level -> pod runs parallel to the hull (the pre-redesign behaviour)
-//   down  -> fore end lowered (pod noses down)
+// Nacelle vertical-position options: where the pod sits relative to the hull's
+// midships "waterline" (the centreline, y = 0), for the PYLON mount. The pod is
+// always mounted on its strut (the strut runs hull -> pod and follows the pod's
+// height, so the connection is preserved at every position). A missing/invalid
+// value falls back to 'level' in buildNacelle.
+//   up    -> pod raised above the centreline (top of the hull)
+//   level -> pod on the centreline (the waterline)
+//   down  -> pod lowered below the centreline (bottom of the hull)
 export const NACELLE_ANGLE_OPTIONS = ['up', 'level', 'down']
 
 // Nacelle trailing-end (aft cap) options: the shape of the pod's aft end (-Z).
@@ -136,8 +142,6 @@ export const HULL_FEATURE_STYLES = [
   'dome',
   'greeble',
   'roundel',
-  'vent',
-  'bussard',
   'rcsThrusters',
   'panelHatch',
   'lightBank',
@@ -155,57 +159,82 @@ const HULL_FEATURE_CONCRETE = HULL_FEATURE_STYLES.filter((s) => s !== 'mixed')
 // (seed, i) — independent of iteration order (see buildHullFeature).
 const HF_SEED_MULT = 6151
 
-// Weapon style options (mirror of the other component STYLES). Every weapon
-// style keeps its barrel aligned along the axis of travel (+Z, the ship's
-// forward); the styles differ in turret/gunhouse silhouette, barrel, and any
-// emissive tip. A missing/invalid value falls back to 'turret' (the default) in
-// buildWeapon.
+// Weapon generation is MODULAR and ALWAYS RANDOM: every weapon is composed from
+// a fresh assortment of a MOUNT (the housing/blister the barrels emerge from),
+// 1-3 BARRELS (varying style, thickness, and length), and a TIP (the muzzle-end
+// accent). Every barrel keeps its axis aligned with the travel direction (+Z,
+// the ship's forward). The combination is rolled from the seeded rng per
+// weapon, so different ships (and different weapons on a ship) get distinct
+// emplacements — the old curated "style" presets are obsolete.
 //
-// Turret / gunhouse families (distinct housings, mat + a +Z barrel):
-//   turret, twinTurret, boxy, dome, angular
-// Cannon family (thinner barrels, some with emissive tips):
-//   cannon, longCannon, muzzleBrake, suppressor, dish, tipGlow
-//   railgun (long thin rail + glowing channel, kept from before)
-export const WEAPON_STYLES = [
-  'turret',
-  'twinTurret',
-  'boxy',
-  'dome',
-  'angular',
-  'cannon',
-  'longCannon',
-  'muzzleBrake',
-  'suppressor',
-  'dish',
-  'tipGlow',
-  'railgun',
-]
+// Mounts — the housing/blister the barrels emerge from. Each is built tall
+// enough to enclose the thickest barrel so the breech sits fully inside.
+export const MOUNT_STYLES = ['dome', 'hex', 'boxy', 'faceted', 'angular', 'low']
+// Barrels — the gun tubes, varying in style (profile), thickness (radius ×R),
+// and length (×len).
+export const BARREL_STYLES = ['standard', 'lance', 'fat', 'tapered', 'rail', 'boxed']
+// Tips — the muzzle-end accent. 'none' is a plain mat muzzle step (no glow);
+// the rest carry the ship's single emissive accent (ctx.glowMat).
+export const TIP_STYLES = ['none', 'glow', 'dish', 'brake', 'suppressor', 'ring', 'rail', 'reflector']
 
-// Where on the hull the weapons are mounted (independent of `style`, which is
-// the weapon's own geometry). A missing/invalid value falls back to 'top' in
-// buildWeapon. `chin` = forward-bottom (under the nose), `belly` = ventral keel
-// line, `top` = the classic upper girdle ring (the pre-redesign behaviour).
+// The open-assortment ranges a weapon is rolled from. `thickness`/`length` are
+// [lo, hi] multipliers (on R and len respectively); `length` can roll to a
+// recessed near-zero (a flush beam emitter, only the tip glows).
+const WEAPON_THICKNESS = [0.05, 0.13]
+const WEAPON_LENGTH = [0.05, 2.0]
+// Narrow-barrel bias: a power exponent applied to the rng value before lerping
+// across the thickness range. >1 skews the result toward the LOW (narrow) end,
+// so most barrels come out thin and only occasionally a thicker one. 1.8 is a
+// strong bias (the median barrel lands at ~38% of the range instead of 50%).
+const THICKNESS_NARROW_BIAS = 1.8
+// Lerp across [lo, hi] with a narrow bias: the rng value is raised to the bias
+// power first, skewing the sample toward lo (narrow). Deterministic in the rng.
+function biasedThickness(lo, hi, r, bias = THICKNESS_NARROW_BIAS) {
+  return lo + (hi - lo) * Math.pow(r, bias)
+}
+// Roll a fresh weapon combination from ALL the modular parts: any mount, 1-3
+// barrels, any barrel family, any thickness/length, any tip. Deterministic in
+// the rng, so the same seed reproduces the same weapon.
+function rollWeaponSpec(rng) {
+  const pick = (arr) => arr[Math.floor(rng.next() * arr.length)]
+  return {
+    mount: pick(MOUNT_STYLES),
+    count: [1, 3],
+    barrel: pick(BARREL_STYLES),
+    thickness: WEAPON_THICKNESS,
+    length: WEAPON_LENGTH,
+    tip: pick(TIP_STYLES),
+  }
+}
+
+// Where on the hull the weapons are mounted (independent of `style`/preset,
+// which is the weapon's own geometry). A missing/invalid value falls back to
+// 'top' in buildWeapon. `chin` = forward-bottom (under the nose), `belly` =
+// ventral keel line, `top` = the classic upper girdle ring.
 export const WEAPON_POSITIONS = ['top', 'chin', 'belly', 'nose']
 
-// Per-weapon-style glow accents. Turret/gunhouse styles are mat-only (no glow);
-// the cannon variants and railgun get an emissive tip/channel. Every glowing part
-// shares the ship's single glow material (ctx.glowMat, built from palette[3] in
-// generateModules) so a ship's lights read as one coherent signature.
-const WEAPON_GLOW_STYLES = new Set([
-  'cannon',
-  'longCannon',
-  'muzzleBrake',
-  'suppressor',
-  'dish',
-  'tipGlow',
-  'railgun',
-])
-// Return the shared glow material for weapon styles that glow, else null (the
-// turret/gunhouse family has no emissive accent).
-function weaponGlowMat(style, sharedGlowMat) {
-  const s = WEAPON_STYLES.includes(style) ? style : 'turret'
-  return WEAPON_GLOW_STYLES.has(s) ? sharedGlowMat : null
+// Tips that carry an emissive accent (the rest are mat-only). Every glowing
+// part shares the ship's single glow material (ctx.glowMat, built from
+// palette[3] in generateModules) so a ship's lights read as one coherent
+// signature.
+const GLOW_TIPS = new Set(['glow', 'dish', 'suppressor', 'ring', 'rail', 'reflector'])
+// Return the shared glow material for tips that glow, else null (mat-only tips
+// have no emissive accent).
+function tipGlowMat(tip, sharedGlowMat) {
+  return GLOW_TIPS.has(tip) ? sharedGlowMat : null
 }
+// Dish-like reflectors (a single concave bowl) don't read on a multi-barrel
+// mount — each barrel needs its own muzzle, and a shared dish/reflector would
+// straddle the barrels. Forbid these tips on weapons with more than one barrel.
+const SINGLE_BARREL_TIPS = new Set(['dish', 'reflector'])
+// Barrel families with a RECTANGULAR cross-section (a box, not a round tube).
+// Tips that wrap the barrel's circumference (the round double-frustum brake)
+// don't fit these, so they're re-rolled on rectangular barrels.
+const RECT_BARRELS = new Set(['rail', 'boxed'])
+// Tips that only fit a ROUND barrel cross-section (re-rolled on rectangular
+// barrels). The brake's double-frustum is a round bicone that would float oddly
+// around a boxy barrel.
+const ROUND_ONLY_TIPS = new Set(['brake'])
 
 // Derive a glass tint from the ship's single emissive colour: a brightened
 // version for the glass body + a darker attenuation colour so glazing reads as
@@ -1114,11 +1143,12 @@ function buildBridgeDome(b) {
 // are enclosed glass cockpits (glass material), others are matte prisms (mat).
 // Two neck styles:
 //   round:  a short tapered cylinder with a flange (classic).
-//   wedge:  a triangular prism extruded in X, with its bottom face flush
-//           (or slightly embedded) in the hull and its apex reaching into
-//           the capsule. The apex has random play in the Y-Z plane.
+//   wedge:  a right-triangle prism extruded in X, with the right angle on the
+//           leading (fore) edge: a vertical leg drops from the upper tip to
+//           the deck and a horizontal leg runs aft. The upper tip is centered
+//           at the top of the capsule.
 function buildBridgeCapsule(rng, b) {
-  const { mat, glowMat, glass, z, topY, deckY = topY } = b
+  const { mat, glowMat, z, topY, deckY = topY } = b
   // Halve the capsule bridge dimensions so it reads as a compact cockpit pod
   // rather than a bulky block. The neck and flange scale with the capsule.
   const w = b.w * 0.5
@@ -1132,8 +1162,6 @@ function buildBridgeCapsule(rng, b) {
   const group = new THREE.Group()
   group.name = 'bridge:capsule'
 
-  const isGlass = rng.chance(0.4)
-  const capsuleMat = isGlass ? glass : mat
   const sides = rng.int(2, 4) * 2
   const rotY = Math.PI / sides
   const capsuleR = w * 0.42
@@ -1145,22 +1173,26 @@ function buildBridgeCapsule(rng, b) {
 
   const neckStyle = rng.chance(0.5) ? 'wedge' : 'round'
   let capY, capZ = z
+  // Height from the deck to the capsule's TOP vertex (capY + capsuleR).
+  // Both neck styles size themselves so their apex/top reaches this point.
+  const capTopY = deckY + capsuleR
 
   if (neckStyle === 'wedge') {
-    // Triangular-prism neck: cross-section in the Y-Z plane, extruded in X.
-    // The base edge sits slightly inside the DECK; the apex reaches into the
-    // capsule and is guaranteed to clear the deck by `neckClear`. The apex has
-    // random play in Y and Z.
+    // Right-triangle prism neck: cross-section in the Y-Z plane, extruded in
+    // X. The right angle is on the LEADING edge (fore, +Z): a vertical leg
+    // drops from the upper tip to the deck, and a horizontal leg runs aft.
+    // The upper tip is centered at the top of the capsule.
     const wedgeHalfW = w * 0.45
-    const wedgeH = Math.max(h * 0.5, neckClear)
-    const apexY = deckY + wedgeH + rng.range(-h * 0.04, h * 0.06)
-    const apexZ = z + rng.range(-d * 0.06, d * 0.06)
+    const wedgeH = Math.max(capTopY - deckY, neckClear)
+    const tipY = capTopY
+    const tipZ = z
     const botY = deckY - h * 0.03
+    const baseDepth = wedgeH * 0.6
 
     const shape = new THREE.Shape()
-    shape.moveTo(-wedgeHalfW, botY)
-    shape.lineTo(wedgeHalfW, botY)
-    shape.lineTo(0, apexY)
+    shape.moveTo(tipZ, tipY)
+    shape.lineTo(tipZ, botY)
+    shape.lineTo(tipZ - baseDepth, botY)
     shape.closePath()
 
     // Extrude the triangle along +Z (shape normal), then rotate so the
@@ -1171,17 +1203,17 @@ function buildBridgeCapsule(rng, b) {
     const wedge = new THREE.Mesh(prismGeo, mat)
     wedge.name = 'bridgeCapsuleNeckWedge'
     wedge.rotation.y = -Math.PI / 2
-    // Center the extrusion in X: the shape's local Z (extrusion) runs 0..depth
-    // which becomes world X 0..depth after rotation. Offset by -depth/2.
-    wedge.position.x = -prismDepth / 2
+    // rotation.y = -PI/2 maps local +Z (the extrusion) to world -X, so the
+    // extrusion spans world X 0..-depth. Offset by +depth/2 to center it.
+    wedge.position.x = prismDepth / 2
     group.add(wedge)
 
-    capY = apexY + capsuleR * 0.15
-    capZ = apexZ
+    capY = capTopY
+    capZ = z
   } else {
     // Round neck: a tapered cylinder rising from the DECK, flaring at the base.
     // Its height is guaranteed to clear the deck by `neckClear`.
-    const neckH = Math.max(h * 0.4, neckClear)
+    const neckH = Math.max(capTopY - deckY, neckClear)
     const neckTopR = w * 0.24
     const neckBotR = w * 0.38
     const neck = new THREE.Mesh(new THREE.CylinderGeometry(neckTopR, neckBotR, neckH, 8), mat)
@@ -1234,35 +1266,27 @@ function buildBridgeCapsule(rng, b) {
   })
   capsuleGeo.translate(0, 0, -capsuleLen / 2)
 
-  const capsule = new THREE.Mesh(capsuleGeo, capsuleMat)
-  capsule.name = isGlass ? 'bridgeCapsuleGlass' : 'bridgeCapsulePrism'
+  // The capsule is always the windowless hull-module material (mat) — a matte
+  // prism pod, not a glass cockpit. The diamond end-caps are small extrusions
+  // of the SAME polygon profile as the body (polyShape), so their orientation
+  // matches the capsule body (flat top/bottom for 4 and 8 sides, point at top
+  // for 6). They sit slightly proud of the beveled end faces.
+  const capsule = new THREE.Mesh(capsuleGeo, mat)
+  capsule.name = 'bridgeCapsulePrism'
   capsule.scale.set(xStretch, 1, 1)
   capsule.position.set(0, capY, capZ)
   group.add(capsule)
 
   const foreZ = capsuleLen * 0.5 + bevelT
 
-  // For the glass variant: a faceted cone tip pointing fore (+Z).
-  if (isGlass) {
-    const capR = capsuleR * 0.9
-    const capLen = capsuleLen * 0.3
-    const cap = new THREE.Mesh(new THREE.ConeGeometry(capR, capLen, sides), glass)
-    cap.name = 'bridgeCapsuleCap'
-    cap.scale.set(xStretch, 1, 1)
-    cap.rotation.y = rotY
-    cap.rotation.x = Math.PI / 2
-    cap.position.set(0, capY, capZ + foreZ + capLen * 0.5)
-    group.add(cap)
-  } else {
-    const capGeo = new THREE.ExtrudeGeometry(polyShape, { depth: h * 0.04, bevelEnabled: false })
-    capGeo.translate(0, 0, -(h * 0.04) / 2)
-    for (const [name, dz] of [['bridgeCapsulePrismCapFore', 1], ['bridgeCapsulePrismCapAft', -1]]) {
-      const endCap = new THREE.Mesh(capGeo, mat)
-      endCap.name = name
-      endCap.scale.set(xStretch, 1, 1)
-      endCap.position.set(0, capY, capZ + dz * (capsuleLen * 0.5 + bevelT + h * 0.02))
-      group.add(endCap)
-    }
+  const capGeo = new THREE.ExtrudeGeometry(polyShape, { depth: h * 0.04, bevelEnabled: false })
+  capGeo.translate(0, 0, -(h * 0.04) / 2)
+  for (const [name, dz] of [['bridgeCapsulePrismCapFore', 1], ['bridgeCapsulePrismCapAft', -1]]) {
+    const endCap = new THREE.Mesh(capGeo, mat)
+    endCap.name = name
+    endCap.scale.set(xStretch, 1, 1)
+    endCap.position.set(0, capY, capZ + dz * (capsuleLen * 0.5 + bevelT + h * 0.02))
+    group.add(endCap)
   }
 
   // Narrow luminous slit on the capsule's fore flat face (+Z).
@@ -1270,7 +1294,7 @@ function buildBridgeCapsule(rng, b) {
   const slitH = h * 0.04
   const slit = new THREE.Mesh(new THREE.BoxGeometry(slitW, slitH, h * 0.015), glowMat)
   slit.name = 'bridgeCapsuleSlit'
-  const foreFaceZ = capZ + foreZ + (isGlass ? capsuleLen * 0.3 * 0.85 : h * 0.05)
+  const foreFaceZ = capZ + foreZ + h * 0.05
   slit.position.set(0, capY, foreFaceZ)
   group.add(slit)
 
@@ -1690,11 +1714,6 @@ function buildNacelle(rng, ctx) {
   // the -X twin. Force side=+1 so the lone half-group pod always sits at +X.
   const side = mount === 'waist' ? 1 : i % 2 === 0 ? -1 : 1
 
-  // Per-pair sub-RNG: keyed on (shipSeed + instance index) so each pair (mirror
-  // twins share the same i) gets consistent per-pair variation, while different
-  // instances can differ. Keeps the mirror symmetric (same i → same values).
-  const pairRng = createRng((ctx.seed ?? 0) + i * PAIR_SEED_MULT)
-
   // --- Placement (z, side offset, pod dimensions) depends on the mount --------
   let r, len, z, sideExtent, cy, hasStrut, hasNose
   let aftRingOverride = false
@@ -1709,7 +1728,15 @@ function buildNacelle(rng, ctx) {
     z = lerp(-hull.length * 0.5, fore.z, t)
     const hullSideExtent = surface.maxSideAt(z)
     const lift = NACELLE_LIFT_OPTIONS.includes(cfg.lift) ? cfg.lift : 0
-    cy = hull.height * 0.5 * lift
+    // Pod height above the centreline: the `lift` (a fraction of the hull
+    // height) plus the `angle` vertical position (up / level / down, as a
+    // fraction of the hull half-height). 'level' adds nothing; 'up' raises the
+    // pod to the top of the hull, 'down' lowers it to the bottom. The strut
+    // (built below) runs hull -> pod and follows cy, so the connection is
+    // preserved at every position.
+    const angle = NACELLE_ANGLE_OPTIONS.includes(cfg.angle) ? cfg.angle : 'level'
+    const angleY = angle === 'up' ? 1 : angle === 'down' ? -1 : 0
+    cy = hull.height * 0.5 * (lift + angleY)
     hasStrut = true
     hasNose = true
     // The pod sits ON its pylon, outboard of the hull surface by `reach` so the
@@ -1829,7 +1856,7 @@ function buildNacelle(rng, ctx) {
 
   // --- Mount hardware (strut + flange + hub) for the pylon mount --------------
   if (hasStrut) {
-    buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat, pairRng)
+    buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat, cfg)
   }
 
   return group
@@ -2340,10 +2367,11 @@ function buildNacellePod(group, type, center, r, len, hasNose, mat, glowMat, glo
 
 // Build the nacelle's swept support strut (pylon mount): a strut from the hull
 // flank root to the pod, with a flange normal to the hull + a hub at the pod.
-function buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat, pairRng) {
-  // Strut sweep along +Z (per-pair): the hull root is offset fore/aft of the
-  // pod so the strut slants. Per-pair so each z-pair sweeps independently.
-  const sweep = pairRng.pick(NACELLE_STRUT_STYLES)
+function buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat, cfg) {
+  // Strut sweep along +Z: the hull root is offset fore/aft of the pod so the
+  // strut slants. Driven by the `strut` config field (forward / straight /
+  // aft) so the user's choice is honored.
+  const sweep = NACELLE_STRUT_STYLES.includes(cfg.strut) ? cfg.strut : 'straight'
   const sweepZ = (sweep === 'forward' ? -1 : sweep === 'aft' ? 1 : 0) * len * 0.55
   const rootZ = z + sweepZ
   // Root sits on the flank at the ROOT's z (sampled at rootZ) so the flange
@@ -2413,9 +2441,7 @@ function buildNacelleStrut(group, side, surface, sideExtent, cy, z, len, r, mat,
 function buildWeapon(rng, ctx) {
   const { hull, fore, bottom, surface, color, accent } = ctx
   const cfg = ctx.params.weapons
-  const style = WEAPON_STYLES.includes(cfg.style) ? cfg.style : 'turret'
   let position = WEAPON_POSITIONS.includes(cfg.position) ? cfg.position : 'top'
-  const glowMat = weaponGlowMat(style, ctx.glowMat)
   // Weapons get their OWN material, derived from the palette's ACCENT colour
   // (palette[2] passed in as `accent`) — the saturated, identity colour of each
   // aesthetic. The base colour (palette[0]) is deliberately desaturated, so
@@ -2561,70 +2587,93 @@ function buildWeapon(rng, ctx) {
       // its up-axis along +Y).
       surfaceNormal = new THREE.Vector3(0, 1, 0)
     } else {
-      // Each weapon seats on the hull's ACTUAL surface: `surfaceRadiusAt` gives
-      // the true surface distance in the weapon's direction. We place the base
-      // at that radius and embed it slightly inward so the housing sits flush
-      // on (or just inside) the deck rather than floating in the air above it.
-      const angle = (i / n) * PI2
-      const surfR = surface.surfaceRadiusAt(angle, z)
+      // Top: weapons mounted on the hull's TOP surface, spread across the
+      // beam (port to starboard) at the deck height. A single weapon sits at
+      // the centreline top; multiple spread in X. Each seats on the actual
+      // surface at the top, embedded slightly inward so the housing sits flush
+      // on (or just inside) the deck rather than floating above it.
+      const topY = surface.surfaceAt('top', z)
       const embed = R * WEAPON_EMBED
-      const rr = Math.max(surfR - embed, surfR * 0.5)
-      mountX = Math.cos(angle) * rr
-      mountY = Math.sin(angle) * rr
+      // Spread in X: a single weapon at the centreline (x=0); multiple weapons
+      // spread across the beam from port to starboard. The spread is a fraction
+      // of the beam so weapons stay on the deck (not at the extreme flanks).
+      const spread = n === 1 ? 0 : (i / (n - 1) - 0.5) * (hull.beam * 0.7)
+      mountX = spread
+      mountY = topY - embed
       barrelY = mountY + dirY * R * 0.25
-      // Outward normal of the cross-section ellipse at this angle.
-      const halfX = Math.max(surface.surfaceAt('side', z), 1e-3)
-      const halfY = Math.max(surface.surfaceAt('top', z), 1e-3)
-      surfaceNormal = new THREE.Vector3(
-        Math.cos(angle) / halfX,
-        Math.sin(angle) / halfY,
-        0,
-      ).normalize()
+      // Outward normal: straight up (+Y) for the top surface. On a curved hull
+      // the true normal at an off-centre mount point tilts slightly, but for a
+      // top mount the +Y normal keeps the housing upright and the barrel
+      // pointing forward, which reads correctly at a glance.
+      surfaceNormal = new THREE.Vector3(0, 1, 0)
     }
   }
 
-  const base = { mat: weaponMat, glowMat, R, len, mountX, mountY, z, barrelX: mountX, barrelY, dirY }
-  let g
-  switch (style) {
-    // Turret / gunhouse family (distinct housings, mat + a +Z barrel).
-    case 'twinTurret':
-      g = buildWeaponTwinTurret(base)
-      break
-    case 'boxy':
-      g = buildWeaponBoxy(base)
-      break
-    case 'dome':
-      g = buildWeaponDome(base)
-      break
-    case 'angular':
-      g = buildWeaponAngular(base)
-      break
-    // Cannon family (thinner barrels, some with emissive tips).
-    case 'longCannon':
-      g = buildWeaponLongCannon(base)
-      break
-    case 'muzzleBrake':
-      g = buildWeaponMuzzleBrake(base)
-      break
-    case 'suppressor':
-      g = buildWeaponSuppressor(base)
-      break
-    case 'dish':
-      g = buildWeaponDish(base)
-      break
-    case 'tipGlow':
-      g = buildWeaponTipGlow(base)
-      break
-    case 'cannon':
-      g = buildWeaponCannon(base)
-      break
-    case 'railgun':
-      g = buildWeaponRailgun(base)
-      break
-    case 'turret':
-    default:
-      g = buildWeaponTurret(base)
-      break
+  // MODULAR COMPOSITION: every weapon rolls a fresh open assortment from the
+  // rng (any mount, 1-3 barrels, any barrel family, any thickness/length, any
+  // tip). Each weapon is: a MOUNT (housing, sized to enclose the barrels), 1-3
+  // IDENTICAL BARRELS (the barrel spec is rolled once per weapon and shared by
+  // every barrel, so a multi-barrel weapon reads as a uniform gun mount), and
+  // the SAME TIP on every barrel.
+  const preset = rollWeaponSpec(rng)
+  // Barrel count within the preset's range (1-3).
+  const barrelCount = Math.round(lerp(preset.count[0], preset.count[1], rng.next()))
+  // The tip, resolved AFTER the barrel count so a dish-like reflector (which
+  // doesn't read on a multi-barrel mount) can be re-rolled to another tip when
+  // there's more than one barrel. The re-roll draws from the rng, so it stays
+  // deterministic in the seed.
+  let tip = TIP_STYLES.includes(preset.tip) ? preset.tip : 'none'
+  if (barrelCount > 1 && SINGLE_BARREL_TIPS.has(tip)) {
+    const allowed = TIP_STYLES.filter((t) => !SINGLE_BARREL_TIPS.has(t))
+    tip = allowed[Math.floor(rng.next() * allowed.length)]
+  }
+  // Round-only tips (the brake's double-frustum) don't fit a rectangular barrel
+  // cross-section (rail/boxed): re-roll to another tip in that case.
+  if (RECT_BARRELS.has(preset.barrel) && ROUND_ONLY_TIPS.has(tip)) {
+    const allowed = TIP_STYLES.filter((t) => !ROUND_ONLY_TIPS.has(t))
+    tip = allowed[Math.floor(rng.next() * allowed.length)]
+  }
+  const glowMat = tipGlowMat(tip, ctx.glowMat)
+  // ONE shared barrel spec per weapon (rolled once from the rng): every barrel
+  // on this weapon has the same thickness and length, so the mount reads as a
+  // uniform set of identical guns rather than a mixed assortment. Thickness is
+  // biased toward the narrow end (see THICKNESS_NARROW_BIAS) so most weapons
+  // get thin barrels.
+  const barrelThickness = biasedThickness(preset.thickness[0], preset.thickness[1], rng.next())
+  // Length can roll down to near-zero (a recessed beam emitter, where the barrel
+  // is flush with the mount and only the tip glows). A small floor keeps the
+  // cylinder geometry from being exactly zero-height (degenerate) while still
+  // reading as recessed.
+  const barrelLengthMult = Math.max(lerp(preset.length[0], preset.length[1], rng.next()), BARREL_MIN_LENGTH_FRAC)
+  const maxBarrelRadius = R * barrelThickness
+
+  const g = new THREE.Group()
+  g.name = `weapon:${preset.mount}`
+  // 1. The mount (housing), sized to enclose the barrels so the breech sits
+  //    fully inside. The mount's meshes are at absolute coords (the group origin
+  //    is the hull origin).
+  const mount = buildMount(preset.mount, weaponMat, { R, mountX, mountY, z, dirY }, maxBarrelRadius)
+  g.add(mount)
+  // 2. The barrels, spread in X around the mount's centreline, all identical
+  //    (same thickness/length). The breech of each starts at z + R*0.2 (forward
+  //    of the mount) and the axis points +Z (the travel direction).
+  const barrelSpread = R * 0.18
+  const barrelZ = z + R * 0.2
+  const br = R * barrelThickness
+  const bl = len * barrelLengthMult
+  for (let k = 0; k < barrelCount; k++) {
+    const bx = barrelCount === 1 ? mountX : mountX + (k - (barrelCount - 1) / 2) * barrelSpread
+    const barrel = buildBarrel(preset.barrel, weaponMat, { R, x: bx, y: barrelY, z: barrelZ, br, bl, nameSuffix: barrelCount > 1 ? String(k) : '' })
+    g.add(barrel)
+  }
+  // 3. The tip (muzzle accent), placed on EVERY barrel so the whole weapon
+  //    shares one uniform muzzle finish (not just the frontmost barrel).
+  if (tip !== 'none') {
+    for (let k = 0; k < barrelCount; k++) {
+      const px = barrelCount === 1 ? mountX : mountX + (k - (barrelCount - 1) / 2) * barrelSpread
+      const tipGroup = buildTip(tip, weaponMat, glowMat, { R, x: px, y: barrelY, z: barrelZ, br, bl, dirY })
+      g.add(tipGroup)
+    }
   }
   // Top and belly weapons: rotate the whole group about Z so its local +Y
   // (the "up" axis the geometry is built around) aligns with the outward hull
@@ -2653,6 +2702,394 @@ function buildWeapon(rng, ctx) {
   // port/stbd mirror so they aren't doubled onto themselves.
   if (position === 'nose' || position === 'belly' || (position === 'chin' && mountX === 0)) g.userData.isCentreline = true
   return g
+}
+
+// --- modular weapon builders -------------------------------------------------
+// The weapon is composed from three part families: a MOUNT (housing), one or
+// more BARRELS (the gun tubes), and a TIP (muzzle accent). Each dispatcher
+// resolves the style name to its concrete builder. All builders are pure in
+// (style, mat, geometry params) — no Math.random (the variation comes from the
+// seeded rng in buildWeapon, which picks the style/thickness/length).
+
+// MOUNT: the housing/blister the barrels emerge from. `br` is the thickest
+// barrel radius in the weapon; the housing is sized to enclose it so the breech
+// sits fully inside. Returns a THREE.Group with meshes at absolute coords.
+function buildMount(style, mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  switch (style) {
+    case 'hex': return buildMountHex(mat, { R, mountX, mountY, z, dirY }, br)
+    case 'boxy': return buildMountBoxy(mat, { R, mountX, mountY, z, dirY }, br)
+    case 'faceted': return buildMountFaceted(mat, { R, mountX, mountY, z, dirY }, br)
+    case 'angular': return buildMountAngular(mat, { R, mountX, mountY, z, dirY }, br)
+    case 'low': return buildMountLow(mat, { R, mountX, mountY, z, dirY }, br)
+    case 'dome':
+    default: return buildMountDome(mat, { R, mountX, mountY, z, dirY }, br)
+  }
+}
+
+// BARREL: a gun tube along +Z. The breech (rear) is at (x, y, z); the barrel
+// extends forward (+Z) by `bl` with radius `br`. Returns a THREE.Group.
+function buildBarrel(style, mat, { x, y, z, br, bl, nameSuffix = '' }) {
+  switch (style) {
+    case 'lance': return buildBarrelLance(mat, { x, y, z, br, bl, nameSuffix })
+    case 'fat': return buildBarrelFat(mat, { x, y, z, br, bl, nameSuffix })
+    case 'tapered': return buildBarrelTapered(mat, { x, y, z, br, bl, nameSuffix })
+    case 'rail': return buildBarrelRail(mat, { x, y, z, br, bl, nameSuffix })
+    case 'boxed': return buildBarrelBoxed(mat, { x, y, z, br, bl, nameSuffix })
+    case 'standard':
+    default: return buildBarrelStandard(mat, { x, y, z, br, bl, nameSuffix })
+  }
+}
+
+// TIP: the muzzle-end accent. Most are placed at the front of the barrel (the
+// muzzle, z + bl); the 'rail' tip runs the full length of the barrel instead, so
+// it also receives the breech Z and the barrel length. `dirY` (+1/-1) is the
+// "away from the hull" direction, used by the rail tip to pick its side.
+// Returns a THREE.Group.
+function buildTip(style, mat, glowMat, { R, x, y, z, br, bl, dirY = 1 }) {
+  const muzzleZ = z + bl
+  switch (style) {
+    case 'glow': return buildTipGlow(glowMat, { x, y, z: muzzleZ, R, br })
+    case 'dish': return buildTipDish(glowMat, { x, y, z: muzzleZ, R, br })
+    case 'brake': return buildTipBrake(mat, { x, y, z: muzzleZ, R, br })
+    case 'suppressor': return buildTipSuppressor(glowMat, { x, y, z: muzzleZ, R, br })
+    case 'ring': return buildTipRing(glowMat, { x, y, z: muzzleZ, R, br })
+    case 'rail': return buildTipRail(glowMat, { x, y, z, bl, br, dirY })
+    case 'reflector': return buildTipReflector(glowMat, { x, y, z: muzzleZ, R, br })
+    case 'none':
+    default: return buildTipNone(mat, { x, y, z: muzzleZ, R, br })
+  }
+}
+
+// --- mount builders (the housing/blister) ------------------------------------
+// Each is built tall enough (by `br`, the thickest barrel radius) that the
+// barrel's breech sits fully inside the housing. The base (contact plate) is
+// anchored at (mountX, mountY, z); the housing grows in the +dirY direction.
+
+// Dome: a rounded mat turret dome on a mount ring (the classic turret housing).
+function buildMountDome(mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  const group = new THREE.Group()
+  group.name = 'weaponMount:dome'
+  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
+  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.42, R * 0.52, R * 0.32 + br, 16), mat)
+  mount.name = 'weaponMountRing'
+  mount.position.set(mountX, mountY + dirY * br / 2, z)
+  group.add(mount)
+  // Dome cap (equator at its centre, extending up to centre + radius): growing
+  // the radius by br raises the top by br with the base anchored.
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(R * 0.36 + br, 16, 10, 0, PI2, 0, Math.PI * 0.55), mat)
+  dome.name = 'weaponMountDomeCap'
+  dome.position.set(mountX, mountY + dirY * R * 0.14, z)
+  if (dirY === -1) dome.rotation.z = Math.PI
+  group.add(dome)
+  return group
+}
+
+// Hex: a hexagonal mat gunhouse (6-sided cylinder), the workhorse mount for
+// multi-barrel and cannon weapons. Made taller by br so the breech is enclosed.
+function buildMountHex(mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  const group = new THREE.Group()
+  group.name = 'weaponMount:hex'
+  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
+  const house = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.38, R * 0.46, R * 0.44 + br, 6), mat)
+  house.name = 'weaponMountHexHouse'
+  house.position.set(mountX, mountY + dirY * (R * 0.06 + br / 2), z)
+  group.add(house)
+  addAftArm(group, mat, mountX, mountY, z, R, dirY)
+  return group
+}
+
+// Boxy: an angular, blocky mat gunhouse with a cheek guard.
+function buildMountBoxy(mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  const group = new THREE.Group()
+  group.name = 'weaponMount:boxy'
+  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
+  const house = new THREE.Mesh(new THREE.BoxGeometry(R * 0.62, R * 0.52 + br, R * 0.72), mat)
+  house.name = 'weaponMountBoxyHouse'
+  house.position.set(mountX, mountY + dirY * (R * 0.06 + br / 2), z)
+  group.add(house)
+  const cheek = new THREE.Mesh(new THREE.BoxGeometry(R * 0.4, R * 0.16, R * 0.45), mat)
+  cheek.name = 'weaponMountBoxyCheek'
+  cheek.position.set(mountX, mountY + dirY * (R * 0.3 + br / 2), z + R * 0.22)
+  group.add(cheek)
+  return group
+}
+
+// Faceted: a rounded, faceted (icosahedron) mat blister.
+function buildMountFaceted(mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  const group = new THREE.Group()
+  group.name = 'weaponMount:faceted'
+  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
+  // Y-scale grows by br/r so the top rises by br; the centre shifts up by br/2
+  // to keep the base anchored.
+  const dome = new THREE.Mesh(new THREE.IcosahedronGeometry(R * 0.42, 1), mat)
+  dome.name = 'weaponMountFacetedHouse'
+  dome.scale.set(1, 0.72 + br / (R * 0.42), 1.1)
+  dome.position.set(mountX, mountY + dirY * (R * 0.12 + br / 2), z)
+  group.add(dome)
+  return group
+}
+
+// Angular: a chamfered hexagonal mat housing (6-sided cylinder, X-rotated) with
+// a flat deck plate.
+function buildMountAngular(mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  const group = new THREE.Group()
+  group.name = 'weaponMount:angular'
+  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
+  const wedge = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.38, R * 0.48, R * 0.55 + br, 6, 1), mat)
+  wedge.name = 'weaponMountAngularHouse'
+  wedge.rotation.x = Math.PI / 2
+  wedge.position.set(mountX, mountY + dirY * (R * 0.08 + br / 2), z)
+  group.add(wedge)
+  const deck = new THREE.Mesh(new THREE.BoxGeometry(R * 0.4, R * 0.1, R * 0.45), mat)
+  deck.name = 'weaponMountAngularDeck'
+  deck.position.set(mountX, mountY + dirY * (R * 0.28 + br), z + R * 0.05)
+  group.add(deck)
+  return group
+}
+
+// Low: a sleek low hexagonal profile (the railgun housing).
+function buildMountLow(mat, base, br) {
+  const { R, mountX, mountY, z, dirY } = base
+  const group = new THREE.Group()
+  group.name = 'weaponMount:low'
+  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
+  const profile = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.24, R * 0.3, R * 0.36 + br, 6), mat)
+  profile.name = 'weaponMountLowProfile'
+  profile.position.set(mountX, mountY + dirY * (R * 0.04 + br / 2), z)
+  group.add(profile)
+  addAftArm(group, mat, mountX, mountY, z, R, dirY)
+  return group
+}
+
+// --- barrel builders (the gun tubes along +Z) --------------------------------
+// Each is a multi-part mat barrel: the breech (rear) is at (x, y, z) and the
+// tube extends forward (+Z) by `bl` with radius `br`. `nameSuffix` disambiguates
+// multi-barrel weapons.
+
+// Standard: a smooth mat cylinder with ring bands + a muzzle step.
+function buildBarrelStandard(mat, { x, y, z, br, bl, nameSuffix }) {
+  const group = new THREE.Group()
+  group.name = `weaponBarrel:standard${nameSuffix}`
+  addBarrel(group, mat, x, y, z, br, bl, `weaponBarrel${nameSuffix}`)
+  addBarrelBands(group, mat, x, y, z, br, bl, 2)
+  addMuzzleStep(group, mat, x, y, z + bl, br)
+  return group
+}
+
+// Lance: a very thin, long barrel (the classic "lance") with extra bands.
+function buildBarrelLance(mat, { x, y, z, br, bl, nameSuffix }) {
+  const group = new THREE.Group()
+  group.name = `weaponBarrel:lance${nameSuffix}`
+  addBarrel(group, mat, x, y, z, br, bl, `weaponLanceBarrel${nameSuffix}`)
+  addBarrelBands(group, mat, x, y, z, br, bl, 3)
+  addMuzzleStep(group, mat, x, y, z + bl, br)
+  return group
+}
+
+// Fat: a thick, stocky barrel with a wider muzzle step.
+function buildBarrelFat(mat, { x, y, z, br, bl, nameSuffix }) {
+  const group = new THREE.Group()
+  group.name = `weaponBarrel:fat${nameSuffix}`
+  addBarrel(group, mat, x, y, z, br, bl, `weaponFatBarrel${nameSuffix}`)
+  addBarrelBands(group, mat, x, y, z, br, bl, 2)
+  addMuzzleStep(group, mat, x, y, z + bl, br)
+  return group
+}
+
+// Tapered: a cone that narrows from the breech (wide) to the muzzle (narrow).
+function buildBarrelTapered(mat, { x, y, z, br, bl, nameSuffix }) {
+  const group = new THREE.Group()
+  group.name = `weaponBarrel:tapered${nameSuffix}`
+  const barrel = new THREE.Mesh(new THREE.CylinderGeometry(br * 0.5, br, bl, 16), mat)
+  barrel.name = `weaponTaperedBarrel${nameSuffix}`
+  barrel.rotation.x = Math.PI / 2
+  barrel.position.set(x, y, z + bl * 0.5)
+  group.add(barrel)
+  addBarrelBands(group, mat, x, y, z, br, bl, 2)
+  return group
+}
+
+// Rail: a boxy rail (box) with a glowing-free mat channel groove, for the
+// railgun look. The barrel is a flat box rather than a round tube.
+function buildBarrelRail(mat, { x, y, z, br, bl, nameSuffix }) {
+  const group = new THREE.Group()
+  group.name = `weaponBarrel:rail${nameSuffix}`
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(br * 2, br * 2.8, bl), mat)
+  rail.name = `weaponRailTube${nameSuffix}`
+  rail.position.set(x, y, z + bl * 0.5)
+  group.add(rail)
+  addBarrelBands(group, mat, x, y, z, br * 0.5, bl, 2)
+  addMuzzleStep(group, mat, x, y, z + bl, br * 0.5)
+  return group
+}
+
+// Boxed: a boxy, angular barrel (a stretched box) for a hard-edged look.
+function buildBarrelBoxed(mat, { x, y, z, br, bl, nameSuffix }) {
+  const group = new THREE.Group()
+  group.name = `weaponBarrel:boxed${nameSuffix}`
+  const tube = new THREE.Mesh(new THREE.BoxGeometry(br * 1.8, br * 1.8, bl), mat)
+  tube.name = `weaponBoxedTube${nameSuffix}`
+  tube.position.set(x, y, z + bl * 0.5)
+  group.add(tube)
+  addMuzzleStep(group, mat, x, y, z + bl, br * 0.9)
+  return group
+}
+
+// --- tip builders (the muzzle-end accent) ------------------------------------
+// Each is placed at the barrel's muzzle (x, y, z + bl). Mat-only tips use `mat`;
+// glowing tips use `glowMat` (the ship's single emissive accent).
+
+// None: a plain mat muzzle step (no glow) — the default muzzle finish.
+function buildTipNone(mat, { x, y, z, br }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:none'
+  addMuzzleStep(group, mat, x, y, z, br)
+  return group
+}
+
+// Glow: a bright emissive cone at the muzzle (a "charged" tip).
+function buildTipGlow(glowMat, { x, y, z, R, br }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:glow'
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(br * 1.1, R * 0.2, 12), glowMat)
+  tip.name = 'weaponGlowTip'
+  tip.rotation.x = Math.PI / 2
+  tip.position.set(x, y, z + R * 0.1)
+  group.add(tip)
+  return group
+}
+
+// Dish: a parabolic energy dish (concave toward +Z) with a feed node at focus.
+function buildTipDish(glowMat, { x, y, z, R }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:dish'
+  // The dish is a sphere cap seen from the concave side: the shared glowMat is
+  // single-sided (backfaces culled), so the inner face of the cap would be
+  // invisible. Clone it double-sided for this mesh only (don't mutate the ship's
+  // shared glow material).
+  const dishMat = glowMat.clone()
+  dishMat.side = THREE.DoubleSide
+  const dish = new THREE.Mesh(new THREE.SphereGeometry(R * 0.18, 16, 10, 0, PI2, 0, Math.PI * 0.42), dishMat)
+  dish.name = 'weaponDish'
+  dish.rotation.x = -Math.PI / 2
+  dish.position.set(x, y, z + R * 0.08)
+  group.add(dish)
+  const feed = new THREE.Mesh(new THREE.SphereGeometry(R * 0.05, 8, 6), glowMat)
+  feed.name = 'weaponDishFeed'
+  feed.position.set(x, y, z + R * 0.14)
+  group.add(feed)
+  return group
+}
+
+// Brake (muzzle break): two cone frustums stuck together on their LARGE faces,
+// forming a double-frustum (stretched bicone) whose shared axis runs along the
+// barrel centerline (+Z). The wide "waist" sits at the join; each frustum tapers
+// to a mouth whose diameter MATCHES the barrel's diameter (rSmall = br) toward
+// the breech (-Z) and the muzzle (+Z). Mat-only (no glow). Forbidden on barrels
+// with a rectangular cross-section (rail/boxed) — see the composer.
+function buildTipBrake(mat, { x, y, z, R, br }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:brake'
+  // Each frustum: large radius at the join (rBig), small radius at the mouth
+  // (rSmall = br, so the mouth diameter = the barrel diameter), length `fh`.
+  // The two are joined base-to-base at z + R*0.12. `fh` is long so the double-
+  // frustum reads as a substantial muzzle break.
+  const rBig = br * 1.5
+  const rSmall = br
+  const fh = R * 0.28
+  const joinZ = z + R * 0.12
+  // Frustum toward the breech (-Z): large face at joinZ, tapering to -Z.
+  // CylinderGeometry(rTop, rBottom) with axis along Y; rotate so +Y (top) -> -Z.
+  const back = new THREE.Mesh(new THREE.CylinderGeometry(rSmall, rBig, fh, 12), mat)
+  back.name = 'weaponBrakeBack'
+  back.rotation.x = -Math.PI / 2 // +Y -> -Z (top faces the breech)
+  back.position.set(x, y, joinZ - fh * 0.5)
+  group.add(back)
+  // Frustum toward the muzzle (+Z): large face at joinZ, tapering to +Z.
+  const front = new THREE.Mesh(new THREE.CylinderGeometry(rSmall, rBig, fh, 12), mat)
+  front.name = 'weaponBrakeFront'
+  front.rotation.x = Math.PI / 2 // +Y -> +Z (top faces the muzzle)
+  front.position.set(x, y, joinZ + fh * 0.5)
+  group.add(front)
+  return group
+}
+
+// Suppressor: a long glowing suppressor shroud at the muzzle.
+function buildTipSuppressor(glowMat, { x, y, z, R, br }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:suppressor'
+  const sup = new THREE.Mesh(new THREE.CylinderGeometry(br * 1.3, br * 1.3, R * 0.3, 12), glowMat)
+  sup.name = 'weaponSuppressor'
+  sup.rotation.x = Math.PI / 2
+  sup.position.set(x, y, z + R * 0.15)
+  group.add(sup)
+  return group
+}
+
+// Ring: a glowing torus ring at the muzzle (a muzzle-flash accent).
+function buildTipRing(glowMat, { x, y, z, R, br }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:ring'
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(br * 1.2, br * 0.3, 8, 16), glowMat)
+  ring.name = 'weaponMuzzleRing'
+  ring.position.set(x, y, z + R * 0.06)
+  group.add(ring)
+  return group
+}
+
+// Rail: a glowing energy rail (the classic railgun channel) running the full
+// length of the barrel, on the side facing AWAY from the hull (+dirY). It's a
+// thin box strip slightly proud of the barrel's outer surface, so it reads as a
+// luminous rail the shot travels down. `z` is the breech; the strip spans z..z+bl.
+function buildTipRail(glowMat, { x, y, z, bl, br, dirY }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:rail'
+  // Sits just outside the barrel radius on the +dirY (away-from-hull) face.
+  const railW = br * 0.5
+  const railH = br * 0.28
+  const rail = new THREE.Mesh(new THREE.BoxGeometry(railW, railH, bl), glowMat)
+  rail.name = 'weaponRailChannel'
+  rail.position.set(x, y + dirY * (br + railH * 0.5), z + bl * 0.5)
+  group.add(rail)
+  return group
+}
+
+// Reflector: a dish-like emitter using a HALF-CYLINDER reflector (concave
+// toward +Z) rather than the sphere-cap dish. The half-cylinder's flat face is
+// cut along the barrel axis; the curved face is the reflecting surface. Double-
+// sided so the concave inner face is visible (the shared glowMat is single-sided).
+function buildTipReflector(glowMat, { x, y, z, R }) {
+  const group = new THREE.Group()
+  group.name = 'weaponTip:reflector'
+  const reflectorMat = glowMat.clone()
+  reflectorMat.side = THREE.DoubleSide
+  // Half-cylinder: a cylinder with thetaLength = PI (a semicircular cross-
+  // section). Its axis (the cylinder height) stays aligned with the weapon's
+  // local Y (up) direction — no Z-rotation. The half spans theta 0..PI (the +X
+  // half, flat cut faces in the Y-Z plane), so the curved surface bulges +X and
+  // the concave (inner) face points -X. Rotating about Y by PI/2 turns the
+  // concave face toward +Z (the muzzle), giving a dish-like reflector aimed
+  // forward while its axis stays upright along local Y.
+  const reflector = new THREE.Mesh(
+    new THREE.CylinderGeometry(R * 0.16, R * 0.16, R * 0.28, 16, 1, true, 0, Math.PI),
+    reflectorMat,
+  )
+  reflector.name = 'weaponReflector'
+  reflector.rotation.y = Math.PI / 2 // concave face -> +Z (muzzle); axis stays along Y
+  reflector.position.set(x, y, z + R * 0.08)
+  group.add(reflector)
+  // A feed node at the reflector's focal line.
+  const feed = new THREE.Mesh(new THREE.SphereGeometry(R * 0.05, 8, 6), glowMat)
+  feed.name = 'weaponReflectorFeed'
+  feed.position.set(x, y, z + R * 0.14)
+  group.add(feed)
+  return group
 }
 
 // Build a SINGLE weapon mounted on the flat top of a rectangular block — a
@@ -2793,410 +3230,6 @@ function addAftArm(group, mat, x, y, z, r, dirY = 1) {
   arm.position.set(x, y - dirY * r * 0.06, z - r * 0.28)
   group.add(arm)
   return arm
-}
-
-// U-shaped cradle fork (two side plates + rear plate) that the barrel passes
-// through, giving turret-style weapons a mounted-in-a-fork appearance.
-function addCradle(group, mat, x, y, z, r, len) {
-  const pw = r * 0.05
-  const ph = r * 0.25
-  const sw = r * 0.15
-  const cl = len * 0.5
-  const left = new THREE.Mesh(new THREE.BoxGeometry(pw, ph, cl), mat)
-  left.name = 'weaponCradleL'
-  left.position.set(x - sw, y, z + cl * 0.5)
-  group.add(left)
-  const right = new THREE.Mesh(new THREE.BoxGeometry(pw, ph, cl), mat)
-  right.name = 'weaponCradleR'
-  right.position.set(x + sw, y, z + cl * 0.5)
-  group.add(right)
-  const rear = new THREE.Mesh(new THREE.BoxGeometry(sw * 2 + pw, ph, pw), mat)
-  rear.name = 'weaponCradleRear'
-  rear.position.set(x, y, z)
-  group.add(rear)
-}
-
-// Turret (default): a low, rounded mat turret dome on a mount ring + a short
-// mat +Z-aligned barrel in a cradle fork. No glow accent.
-function buildWeaponTurret(b) {
-  const { mat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:turret'
-  const bl = len * 0.6
-  const br = R * 0.1
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.42, R * 0.52, R * 0.32, 16), mat)
-  mount.name = 'weaponMount'
-  mount.position.set(mountX, mountY, z)
-  group.add(mount)
-
-  const dome = new THREE.Mesh(
-    new THREE.SphereGeometry(R * 0.36, 16, 10, 0, PI2, 0, Math.PI * 0.55),
-    mat,
-  )
-  dome.name = 'weaponTurretDome'
-  dome.position.set(mountX, mountY + dirY * R * 0.14, z)
-  if (dirY === -1) dome.rotation.z = Math.PI
-  group.add(dome)
-
-  addCradle(group, mat, barrelX, barrelY, z + R * 0.12, R, bl)
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-  return group
-}
-
-// Twin turret: a hexagonal mat gunhouse with TWO thin barrels side by side,
-// both +Z, each with a band and muzzle step.
-function buildWeaponTwinTurret(b) {
-  const { mat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:twinTurret'
-  const bl = len * 0.8
-  const br = R * 0.08
-  const off = R * 0.16
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const house = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.36, R * 0.42, R * 0.44, 6), mat)
-  house.name = 'weaponTwinHouse'
-  house.position.set(mountX, mountY + dirY * R * 0.06, z)
-  group.add(house)
-
-  addBarrel(group, mat, barrelX - off, barrelY, z + R * 0.2, br, bl, 'weaponTwinBarrelL')
-  addBarrel(group, mat, barrelX + off, barrelY, z + R * 0.2, br, bl, 'weaponTwinBarrelR')
-  addBarrelBands(group, mat, barrelX - off, barrelY, z + R * 0.2, br, bl, 1)
-  addBarrelBands(group, mat, barrelX + off, barrelY, z + R * 0.2, br, bl, 1)
-  addMuzzleStep(group, mat, barrelX - off, barrelY, z + R * 0.2 + bl, br)
-  addMuzzleStep(group, mat, barrelX + off, barrelY, z + R * 0.2 + bl, br)
-  return group
-}
-
-// Boxy gunhouse: an angular, blocky mat gunhouse with a single +Z barrel in a
-// cradle fork. The cheek guard frames the barrel.
-function buildWeaponBoxy(b) {
-  const { mat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:boxy'
-  const bl = len * 0.7
-  const br = R * 0.1
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const house = new THREE.Mesh(new THREE.BoxGeometry(R * 0.62, R * 0.52, R * 0.72), mat)
-  house.name = 'weaponBoxyHouse'
-  house.position.set(mountX, mountY + dirY * R * 0.06, z)
-  group.add(house)
-
-  const cheek = new THREE.Mesh(new THREE.BoxGeometry(R * 0.4, R * 0.16, R * 0.45), mat)
-  cheek.name = 'weaponBoxyCheek'
-  cheek.position.set(mountX, mountY + dirY * R * 0.3, z + R * 0.22)
-  group.add(cheek)
-
-  addCradle(group, mat, barrelX, barrelY, z + R * 0.12, R, bl)
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-  return group
-}
-
-// Dome gunhouse: a rounded, faceted (icosahedron detail 1) mat dome with a
-// short +Z barrel.
-function buildWeaponDome(b) {
-  const { mat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:dome'
-  const bl = len * 0.55
-  const br = R * 0.1
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const dome = new THREE.Mesh(new THREE.IcosahedronGeometry(R * 0.42, 1), mat)
-  dome.name = 'weaponDomeHouse'
-  dome.scale.set(1, 0.72, 1.1)
-  dome.position.set(mountX, mountY + dirY * R * 0.12, z)
-  group.add(dome)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-  return group
-}
-
-// Angular gunhouse: a chamfered hexagonal mat housing with a flat deck plate
-// and a +Z barrel.
-function buildWeaponAngular(b) {
-  const { mat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:angular'
-  const bl = len * 0.7
-  const br = R * 0.09
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  // A chamfered hexagonal housing (6-sided cylinder for an angular profile).
-  const wedge = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.38, R * 0.48, R * 0.55, 6, 1), mat)
-  wedge.name = 'weaponAngularHouse'
-  wedge.rotation.x = Math.PI / 2
-  wedge.position.set(mountX, mountY + dirY * R * 0.08, z)
-  group.add(wedge)
-
-  const deck = new THREE.Mesh(new THREE.BoxGeometry(R * 0.4, R * 0.1, R * 0.45), mat)
-  deck.name = 'weaponAngularDeck'
-  deck.position.set(mountX, mountY + dirY * R * 0.28, z + R * 0.05)
-  group.add(deck)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-  return group
-}
-
-// Cannon: a hexagonal mat mount + a thick mat cannon barrel along +Z, with a
-// glowing muzzle ring (accent) at the +Z muzzle.
-function buildWeaponCannon(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:cannon'
-  const bl = len * 0.8
-  const br = R * 0.12
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.28, R * 0.36, R * 0.38, 6), mat)
-  mount.name = 'weaponCannonMount'
-  mount.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(mount)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-
-  const muzzle = new THREE.Mesh(new THREE.TorusGeometry(R * 0.09, R * 0.025, 8, 16), glowMat)
-  muzzle.name = 'weaponMuzzle'
-  muzzle.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.1)
-  group.add(muzzle)
-
-  return group
-}
-
-// Long cannon: a long, very thin barrel (the classic "lance" cannon) with a
-// small glowing tip (accent) at the muzzle.
-function buildWeaponLongCannon(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:longCannon'
-  const bl = len * 1.8
-  const br = R * 0.06
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.3, R * 0.38, R * 0.34, 6), mat)
-  mount.name = 'weaponLongMount'
-  mount.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(mount)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl, 'weaponLongBarrel')
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl, 3)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-
-  const tip = new THREE.Mesh(new THREE.SphereGeometry(R * 0.07, 10, 8), glowMat)
-  tip.name = 'weaponLongTip'
-  tip.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.1)
-  group.add(tip)
-
-  return group
-}
-
-// Muzzle brake: a cannon barrel with a flared, slotted glowing muzzle brake at
-// the +Z tip (accent) — the classic "brake" that vents the shot.
-function buildWeaponMuzzleBrake(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:muzzleBrake'
-  const bl = len * 1.0
-  const br = R * 0.11
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.26, R * 0.34, R * 0.38, 6), mat)
-  mount.name = 'weaponBrakeMount'
-  mount.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(mount)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl, 'weaponBrakeBarrel')
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-
-  // A flared brake housing (mat) at the muzzle.
-  const brake = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.15, R * 0.1, R * 0.24, 12), mat)
-  brake.name = 'weaponBrakeHousing'
-  brake.rotation.x = Math.PI / 2
-  brake.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.12)
-  group.add(brake)
-
-  // Glowing brake slots (accent) — small emissive blocks outside the housing.
-  const slotGeo = new THREE.BoxGeometry(R * 0.04, R * 0.04, R * 0.1)
-  for (let k = 0; k < 4; k++) {
-    const a = (k / 4) * PI2 + Math.PI / 4
-    const slot = new THREE.Mesh(slotGeo, glowMat)
-    slot.name = 'weaponBrakeSlot'
-    slot.position.set(
-      barrelX + Math.cos(a) * R * 0.17,
-      barrelY + Math.sin(a) * R * 0.17,
-      z + R * 0.2 + bl + R * 0.12,
-    )
-    group.add(slot)
-  }
-
-  return group
-}
-
-// Suppressor: a cannon barrel with a long glowing suppressor shroud (accent)
-// at the +Z end — a "silencer" that glows.
-function buildWeaponSuppressor(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:suppressor'
-  const bl = len * 1.4
-  const br = R * 0.07
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.26, R * 0.34, R * 0.38, 6), mat)
-  mount.name = 'weaponSupMount'
-  mount.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(mount)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl, 'weaponSupBarrel')
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-
-  // A glowing suppressor shroud (accent): a wider glowing cylinder at the muzzle.
-  const sup = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.1, R * 0.1, R * 0.3, 12), glowMat)
-  sup.name = 'weaponSuppressor'
-  sup.rotation.x = Math.PI / 2
-  sup.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.15)
-  group.add(sup)
-
-  return group
-}
-
-// Dish cannon: a barrel ending in a glowing parabolic energy dish (accent) at
-// the +Z tip — a "laser dish" emitter.
-function buildWeaponDish(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:dish'
-  const bl = len * 0.9
-  const br = R * 0.09
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.28, R * 0.36, R * 0.4, 6), mat)
-  mount.name = 'weaponDishMount'
-  mount.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(mount)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl, 'weaponDishBarrel')
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-
-  // A glowing dish (accent): a shallow sphere cap, CONCAVE toward +Z.
-  const dish = new THREE.Mesh(
-    new THREE.SphereGeometry(R * 0.18, 16, 10, 0, PI2, 0, Math.PI * 0.42),
-    glowMat,
-  )
-  dish.name = 'weaponDish'
-  dish.rotation.x = -Math.PI / 2
-  dish.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.08)
-  group.add(dish)
-
-  // A small feed node at the dish's focus (glow), touching the dish surface.
-  const feed = new THREE.Mesh(new THREE.SphereGeometry(R * 0.05, 8, 6), glowMat)
-  feed.name = 'weaponDishFeed'
-  feed.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.14)
-  group.add(feed)
-
-  return group
-}
-
-// Tip glow: a standard cannon barrel with a bright, emissive energy tip (accent)
-// — a "charged" muzzle.
-function buildWeaponTipGlow(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:tipGlow'
-  const bl = len * 1.0
-  const br = R * 0.09
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const mount = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.3, R * 0.38, R * 0.36, 6), mat)
-  mount.name = 'weaponTipMount'
-  mount.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(mount)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  addBarrel(group, mat, barrelX, barrelY, z + R * 0.2, br, bl, 'weaponTipBarrel')
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, br, bl)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + bl, br)
-
-  // A bright emissive tip (accent): a glowing cone at the muzzle, touching the step.
-  const tip = new THREE.Mesh(new THREE.ConeGeometry(R * 0.09, R * 0.2, 12), glowMat)
-  tip.name = 'weaponTip'
-  tip.rotation.x = Math.PI / 2
-  tip.position.set(barrelX, barrelY, z + R * 0.2 + bl + R * 0.18)
-  group.add(tip)
-
-  return group
-}
-
-// Railgun: a sleek low hexagonal profile (mat) with a long thin +Z rail and a
-// visible glowing energy channel (accent) running its length.
-function buildWeaponRailgun(b) {
-  const { mat, glowMat, R, len, mountX, mountY, z, barrelX, barrelY, dirY } = b
-  const group = new THREE.Group()
-  group.name = 'weapon:railgun'
-  const rl = len * 1.2
-
-  addContactPlate(group, mat, mountX, mountY, z, R, dirY)
-
-  const profile = new THREE.Mesh(new THREE.CylinderGeometry(R * 0.24, R * 0.3, R * 0.36, 6), mat)
-  profile.name = 'weaponProfile'
-  profile.position.set(mountX, mountY + dirY * R * 0.04, z)
-  group.add(profile)
-
-  addAftArm(group, mat, mountX, mountY, z, R, dirY)
-
-  const rail = new THREE.Mesh(new THREE.BoxGeometry(R * 0.1, R * 0.14, rl), mat)
-  rail.name = 'weaponRail'
-  rail.position.set(barrelX, barrelY, z + R * 0.2 + rl * 0.5)
-  group.add(rail)
-
-  // Glowing channel (accent) sitting on the outer face of the rail so it is visible.
-  const channel = new THREE.Mesh(new THREE.BoxGeometry(R * 0.04, R * 0.04, rl * 0.88), glowMat)
-  channel.name = 'weaponChannel'
-  channel.position.set(barrelX, barrelY + dirY * R * 0.09, z + R * 0.2 + rl * 0.5)
-  group.add(channel)
-
-  addBarrelBands(group, mat, barrelX, barrelY, z + R * 0.2, R * 0.05, rl, 2)
-  addMuzzleStep(group, mat, barrelX, barrelY, z + R * 0.2 + rl, R * 0.05)
-
-  return group
 }
 
 // Sensor mast: slender mast + sensor head, rising from the top deck. `count`
@@ -3978,23 +4011,24 @@ function buildHullFeatureDome(rng, b) {
   return group
 }
 
-// greeble — 4-8 aligned, partially overlapping boxes + small cylinders of varying
-// sizes stacked along +Y off a base plate. Reads as industrial equipment.
+// greeble — 6-10 shallow, low boxes + small cylinders clustered on a base
+// plate, overlapping in the same low footprint. Reads as low-profile
+// industrial equipment sitting on the hull.
 function buildHullFeatureGreeble(rng, b) {
   const { mat, R } = b
   const group = new THREE.Group()
   group.name = 'hf:greeble'
-  const baseW = R * 0.35
-  const baseH = R * 0.1
+  const baseW = R * 0.4
+  const baseH = R * 0.05
   hfMesh(group, new THREE.BoxGeometry(baseW, baseH, baseW), mat, 'hfGreebleBase', 0, baseH / 2, 0)
-  const n = 4 + rng.int(0, 5) // 4-8
-  let y = baseH
+  const n = 6 + rng.int(0, 5) // 6-10
   for (let k = 0; k < n; k++) {
-    const w = R * (0.12 + rng.next() * 0.2)
-    const h = R * (0.1 + rng.next() * 0.18)
-    const d = R * (0.12 + rng.next() * 0.2)
-    const ox = (rng.next() - 0.5) * baseW * 0.5
-    const oz = (rng.next() - 0.5) * baseW * 0.5
+    const w = R * (0.1 + rng.next() * 0.18)
+    const h = R * (0.04 + rng.next() * 0.08)
+    const d = R * (0.1 + rng.next() * 0.18)
+    const ox = (rng.next() - 0.5) * baseW * 0.8
+    const oz = (rng.next() - 0.5) * baseW * 0.8
+    const y = baseH - h * 0.3
     if (rng.chance(0.7)) {
       hfMesh(group, new THREE.BoxGeometry(w, h, d), mat, 'hfGreebleBox', ox, y + h / 2, oz)
     } else {
@@ -4002,7 +4036,6 @@ function buildHullFeatureGreeble(rng, b) {
       cyl.rotation.x = rng.next() < 0.5 ? Math.PI / 2 : 0
       cyl.rotation.z = rng.next() < 0.5 ? Math.PI / 2 : 0
     }
-    y += h * (0.7 + rng.next() * 0.4)
   }
   return group
 }
@@ -4021,57 +4054,6 @@ function buildHullFeatureRoundel(rng, b) {
   disc.rotation.x = -Math.PI / 2
   const bezel = hfMesh(group, new THREE.TorusGeometry(dR * 1.05, R * 0.03, 6, 24), mat, 'hfRoundelBezel', 0, bulgeH + 0.001, 0)
   bezel.rotation.x = Math.PI / 2
-  return group
-}
-
-// vent — a rectangular or circular mat housing with 3-5 louver slats (thin angled
-// boxes); the "intake" variant gets a faint glowMat interior recess. Reads as
-// heat/airflow.
-function buildHullFeatureVent(rng, b) {
-  const { mat, glowMat, R } = b
-  const group = new THREE.Group()
-  group.name = 'hf:vent'
-  const w = R * 0.32
-  const d = R * 0.26
-  const h = R * 0.16
-  if (rng.chance(0.4)) {
-    hfMesh(group, new THREE.CylinderGeometry(w * 0.5, w * 0.5, h, 20), mat, 'hfVentHousing', 0, h / 2, 0)
-  } else {
-    hfMesh(group, new THREE.BoxGeometry(w, h, d), mat, 'hfVentHousing', 0, h / 2, 0)
-  }
-  const slats = 3 + rng.int(0, 3) // 3-5
-  for (let k = 0; k < slats; k++) {
-    const sy = h * (0.25 + 0.55 * (k / Math.max(1, slats - 1)))
-    const slat = hfMesh(group, new THREE.BoxGeometry(w * 0.92, R * 0.02, d * 0.85), mat, 'hfVentSlat', 0, sy, 0)
-    slat.rotation.x = 0.5
-  }
-  if (rng.chance(0.5)) {
-    const inner = hfMesh(group, new THREE.CircleGeometry(Math.min(w, d) * 0.4, 16), glowMat, 'hfVentInner', 0, h + 0.001, 0)
-    inner.rotation.x = -Math.PI / 2
-  }
-  return group
-}
-
-// bussard — a circular particle collector: mat rim + radial vanes + central hub on
-// a short mount; optional faint glowMat core.
-function buildHullFeatureBussard(rng, b) {
-  const { mat, glowMat, R } = b
-  const group = new THREE.Group()
-  group.name = 'hf:bussard'
-  const r = R * 0.26
-  const mountH = R * 0.12
-  hfMesh(group, new THREE.CylinderGeometry(r * 0.3, r * 0.4, mountH, 10), mat, 'hfBussardMount', 0, mountH / 2, 0)
-  const rimY = mountH + R * 0.02
-  const rim = hfMesh(group, new THREE.TorusGeometry(r, R * 0.03, 8, 24), mat, 'hfBussardRim', 0, rimY, 0)
-  rim.rotation.x = Math.PI / 2
-  const vanes = 8 + rng.int(0, 8) // 8-16
-  for (let k = 0; k < vanes; k++) {
-    const a = (k / vanes) * PI2
-    const vane = hfMesh(group, new THREE.BoxGeometry(r * 0.85, R * 0.02, R * 0.02), mat, 'hfBussardVane', Math.cos(a) * r * 0.5, rimY, Math.sin(a) * r * 0.5)
-    vane.rotation.y = -a
-  }
-  hfMesh(group, new THREE.CylinderGeometry(r * 0.25, r * 0.25, R * 0.06, 10), mat, 'hfBussardHub', 0, rimY, 0)
-  if (rng.chance(0.6)) hfMesh(group, new THREE.SphereGeometry(r * 0.18, 12, 8), glowMat, 'hfBussardCore', 0, rimY, 0)
   return group
 }
 
@@ -4129,6 +4111,8 @@ function buildHullFeaturePanelHatch(rng, b) {
     hfMesh(group, new THREE.SphereGeometry(R * 0.015, 6, 4), mat, 'hfHatchRivet', rx, h + ft * 0.5, rz)
   }
   if (rng.chance(0.5)) hfMesh(group, new THREE.BoxGeometry(R * 0.02, R * 0.02, R * 0.02), glowMat, 'hfHatchLight', w * 0.3, h + ft * 0.5, d * 0.3)
+  // Recess the hatch into the hull by half its thickness.
+  group.position.y -= h * 0.5
   return group
 }
 
@@ -4178,8 +4162,6 @@ function buildHullFeature(rng, ctx) {
     case 'antennaCluster': g = buildHullFeatureAntennaCluster(irng, base); break
     case 'dome': g = buildHullFeatureDome(irng, base); break
     case 'roundel': g = buildHullFeatureRoundel(irng, base); break
-    case 'vent': g = buildHullFeatureVent(irng, base); break
-    case 'bussard': g = buildHullFeatureBussard(irng, base); break
     case 'rcsThrusters': g = buildHullFeatureRcsThrusters(irng, base); break
     case 'panelHatch': g = buildHullFeaturePanelHatch(irng, base); break
     case 'lightBank': g = buildHullFeatureLightBank(irng, base); break
@@ -4248,30 +4230,47 @@ function moduleCount(key, p, density, maxCount) {
 }
 
 // Deterministic normalized z (0..1, fore-ward) for the `count` instances of a
-// module, spread evenly across the hull length. No per-instance jitter: the
+// module, spread across the hull length. No per-instance jitter: the
 // strong-symmetry bias places instances on a symmetric grid (paired counts +
 // mirrored placement, see generateModules) so jitter would break the mirror.
+//
+// The spread is COUNT-DEPENDENT: a single instance sits at midship (its own
+// mirror), while 2+ instances spread across a range that SHRINKS as the count
+// grows. This keeps the outermost instances away from the nose (t=1) and tail
+// (t=0) so modules don't cluster at the tapered ends — the extreme positions
+// are reserved for single instances (nose / back / belly, which the per-builder
+// placement snaps to the tips).
 function instanceTs(count, key, _rng) {
-  const spread = {
+  const base = {
     commandSpike: [0.6, 0.85],
     // Nacelles are biased toward MIDSHIP, away from the nose and stern tapers.
-    // The spread [0.2, 0.7] keeps pods in the central 50% of the hull so their
-    // pylon roots mount on the full-girth flank rather than the tapered ends
-    // (where the hull retreats and the flange can lose contact). The pod-length
-    // clamp in buildNacelle reads this spread.
+    // The spread keeps pods on the full-girth flank rather than the tapered
+    // ends (where the hull retreats and the flange can lose contact). The
+    // pod-length clamp in buildNacelle reads this spread.
     nacelles: [0.2, 0.7],
     weapons: [0.2, 0.85],
     sensorMast: [0.3, 0.8],
     antenna: [0.25, 0.9],
-    // Hull features span nearly the full hull length (the default [0.2, 0.8]
-    // would cluster them midship).
+    // Hull features span a wide band (the default would cluster them midship).
     hullFeatures: [0.08, 0.92],
   }
-  const [a, b] = spread[key] ?? [0.2, 0.8]
+  const [a0, b0] = base[key] ?? [0.2, 0.8]
+  // A single instance sits at midship. For 2+, shrink the spread so the
+  // outermost instances stay off the nose/tail; the band narrows as the count
+  // grows (the central band is where multiple instances live).
+  let a = a0
+  let b = b0
+  if (count > 1) {
+    const shrink = 1 / count
+    const mid = (a0 + b0) / 2
+    const half = ((b0 - a0) / 2) * (1 - shrink)
+    a = mid - half
+    b = mid + half
+  }
   const ts = []
   for (let i = 0; i < count; i++) {
-    const base = count === 1 ? (a + b) / 2 : a + ((b - a) * i) / (count - 1)
-    ts.push(clamp(base, 0, 1))
+    const t = count === 1 ? (a + b) / 2 : a + ((b - a) * i) / (count - 1)
+    ts.push(clamp(t, 0, 1))
   }
   return ts
 }
